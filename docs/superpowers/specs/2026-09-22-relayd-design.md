@@ -1,43 +1,48 @@
 # relayd: agent sidecar over Nostr, managed by Jev
 
 Date: 2026-09-22
-Status: draft for review
+Status: draft for review, revision 2 after reading Buzz
 Working name: `relayd`. One constant in `src/config.ts` plus the package name. Rename is two edits.
 
 ## 1. Problem
 
 Agents on different harnesses (Claude Code, Codex, Hermes, DeepSeek harness, scripts) cannot talk to each other. Each harness is an island. Nobody watches the inbox, so whatever connects them must also decide what each message means and who needs to see it.
 
-## 2. Decisions already made
+## 2. Decisions
 
 | Question | Decision |
 |---|---|
-| Identity and delivery | Nostr. Every human and agent is an npub. Relays carry signed events. |
+| Identity and delivery | Nostr. Every human and agent is an npub. Relays carry signed events. Public relays by default, any relay by config. |
 | Privacy | NIP-17 gift-wrapped DMs for every message. Relays see kind 1059 blobs only. |
-| Meaning | Thin tags: recipient, thread, and a `type` of `ask`, `answer`, `done`, `cant`, `escalate`. |
+| Meaning | Thin `type` tag: `ask`, `ack`, `answer`, `done`, `cant`, `cancel`, `escalate`. |
 | Decisions | Jev (TypeSafe System One) answers typed questions. Code owns control flow and every side effect. |
 | Distribution | Standalone npm package. `npx relayd init` writes `~/.relayd/config.json`. Every harness plugin reads that one file. Not a subcommand of another CLI. |
-| Harness integration | MCP server first. Localhost HTTP as fallback. |
-| Wake-up | The sidecar is a daemon that spawns a configured handler command per message. |
-| Consent | Strangers need one explicit yes from the owner. Known npubs go to Jev triage. |
+| Harness integration, outbound | MCP server first. Localhost HTTP as fallback. |
+| Harness integration, inbound | The daemon drives the harness over ACP, the Agent Client Protocol (JSON-RPC over stdio, from Zed). One ACP session per thread. |
+| Consent | Author gate with four modes, default `allowlist`: strangers need one explicit yes from the owner. Known npubs go to Jev triage. |
 | Owner surface | The owner's own harness and terminal. No Nostr app required. Push via a `notify` command. |
-| Default relays | Public relays. Our own relay is deferred. Config overrides. |
-| First harness | Claude Code via `claude -p`. |
+| First harness | Claude Code via `@agentclientprotocol/claude-agent-acp`. |
+
+Changed in revision 2, from Buzz: ACP instead of `claude -p`; `ack` and `cancel` types; owner control word `cancel`; `respond_to` gate modes; startup burst note. See section 13.
 
 ## 3. Parties
 
-- **Human owner.** Has an npub and a running sidecar, like an agent. Their handler is themselves: they read with `inbox` and answer with `reply` and `allow`.
-- **Agent.** An npub plus a sidecar whose handler is a harness in non-interactive mode.
+- **Human owner.** Has an npub and a running sidecar, like an agent. Their sidecar has no ACP handler: messages wait in the inbox. They read with `inbox` and answer with `reply` and `allow`.
+- **Agent.** An npub plus a sidecar whose handler is a harness speaking ACP.
 - **Relays.** Dumb pipes. Two or three per sidecar for redundancy. Queue events while a sidecar is offline.
 - **Jev.** Not a party. A function inside each sidecar. Never sends, never executes.
 
 ## 4. Processes
 
-- `relayd up`: the daemon. Holds the key, keeps relay sockets open, runs the control loop, serves a localhost HTTP endpoint for local clients. Daemonizes by default; `--foreground` for debugging.
+- `relayd up`: the daemon. Holds the key, keeps relay sockets open, runs the control loop, hosts the ACP child process, serves a localhost HTTP endpoint for local clients. Daemonizes by default; `--foreground` for debugging.
 - `relayd mcp`: thin stdio MCP server the harness spawns. Forwards every tool call to the daemon over localhost HTTP. Starts the daemon if it is not running.
-- `relayd init | whoami | inbox | reply | allow`: CLI. `inbox`, `reply`, `allow` talk to the daemon; `init` and `whoami` read the config file.
+- `relayd init | whoami | inbox | reply | allow | cancel`: CLI. All but `init` and `whoami` talk to the daemon.
 
-HTTP is localhost only. Between machines it is always relays.
+HTTP is localhost only. Between machines it is always relays. ACP is a child process on the same machine.
+
+### ACP in one paragraph
+
+The daemon spawns the handler command once, sends `initialize`, and keeps it alive. For each new thread it calls `session/new` and remembers the session id. Each inbound message on that thread becomes a `session/prompt`. The agent streams `session/update` notifications; the daemon collects the text chunks and treats the final one as the reply when the turn ends with a stop reason. `session/cancel` stops a turn. Permission requests from the agent are answered by policy from config (`acp.permissions: allow | deny`, default `allow` for read and edit, `deny` for anything else). Client library: `@agentclientprotocol/sdk`. Adapters: `claude-agent-acp`, `codex-acp`, `goose acp`, `gemini --acp`, and whatever else the owner puts in `handler`.
 
 ## 5. Wire format
 
@@ -51,11 +56,21 @@ Rumor tags:
 |---|---|
 | `p` | recipient pubkey |
 | `e` | thread root rumor id, omitted on the first message of a thread |
-| `type` | `ask`, `answer`, `done`, `cant`, `escalate` |
+| `type` | one of the seven below |
+
+| Type | Sent by | Meaning |
+|---|---|---|
+| `ask` | anyone | a request, opens or continues a thread |
+| `ack` | sidecar | accepted, a handler is running |
+| `answer` | sidecar or agent | a reply that is not final: a clarifying question, a partial |
+| `done` | sidecar | final result, verified by Jev |
+| `cant` | sidecar | refused, failed, timed out, or output did not answer the ask |
+| `cancel` | owner or original sender | stop work on this thread |
+| `escalate` | sidecar to owner | needs a human: consent, low confidence, out of scope |
 
 Content is plain text. Nothing richer in v1.
 
-Inbox subscription: kind 1059 with `#p` = own pubkey, `since` = last seen minus two days, because gift-wrap timestamps are randomized backward by up to two days. Dedupe on rumor id.
+Inbox subscription: kind 1059 with `#p` = own pubkey, `since` = last seen minus two days, because gift-wrap timestamps are randomized backward by up to two days. Dedupe on rumor id. Expect a burst on first start after downtime; the queue absorbs it.
 
 ## 6. Jev judgments
 
@@ -63,9 +78,9 @@ All questions go through `src/decide.ts`. Each function builds state, asks, and 
 
 | Function | When | Questions (one request) | Used by code as |
 |---|---|---|---|
-| `triage(msg, thread, me)` | inbound from a known npub | Choice `action`: act, ask, escalate. Score `urgency`: low, normal, high, critical. Noul `in_scope`: is this inside `me.capabilities`. | act needs confidence ≥ `thresholds.act` (default 0.85), else degrade to ask; below `thresholds.ask` (0.5) degrade to escalate. `in_scope` false forces escalate. Urgency orders the queue. |
-| `scope(msg, me)` | inbound from a stranger | Noul `in_scope` only | Recommendation text in the consent message to the owner. Never runs anything. |
-| `verify(ask, output)` | handler exited 0 | Noul `answers_ask`: does the output complete the ask | true sends `done`, false sends `cant` with the output attached. |
+| `triage(msg, thread, me)` | inbound `ask` from a known npub | Choice `action`: act, ask, escalate. Score `urgency`: low, normal, high, critical. Noul `in_scope`: is this inside `me.capabilities`. | act needs confidence ≥ `thresholds.act` (0.85), else degrade to ask; below `thresholds.ask` (0.5) degrade to escalate. `in_scope` false forces escalate. Urgency orders the queue. |
+| `scope(msg, me)` | inbound from a stranger | Noul `in_scope` only | Recommendation line in the consent message to the owner. Never runs anything. |
+| `verify(ask, output)` | turn ended normally | Noul `answers_ask`: does the output complete the ask | true sends `done`, false sends `cant` with the output attached. |
 | `route(request, candidates)` | `send` without `to` | Choice among candidate npubs plus `none` | confidence < `thresholds.route` (0.6) or `none` returns candidates to the caller and sends nothing. |
 
 State fields are named JSON: `message.text`, `message.type`, `sender.profile`, `thread.messages[]`, `me.capabilities`. Give each question only what it needs.
@@ -74,25 +89,33 @@ No `TYPESAFE_API_KEY`: `triage` returns escalate, `scope` returns unknown, `veri
 
 ## 7. Control loop
 
-Inbound, on a new rumor addressed to me:
+### Author gate, checked first
 
-1. Append to `inbox.jsonl` with `read: false`. Run `notify` if the message is for the owner's attention (see step 3 and 4).
-2. Sender is `owner`: spawn the handler. Skip triage.
-3. Sender not in `allow`: call `scope`. Send the owner an `escalate` with one line: sender name, the ask, Jev's in-scope verdict and confidence. Park the message. Owner `allow <npub>` re-enters at step 4 with the parked message. Owner `reply` with `cant` forwards to the sender.
-4. Sender in `allow`: call `triage`.
-   - act: send `answer` "Got it, working." Spawn handler with the thread as stdin. On exit 0 call `verify`; send `done` or `cant`. On non-zero exit or timeout send `cant` with the last 2 KB of stderr.
-   - ask: spawn handler with the thread and an instruction to reply with a clarifying question only. Send its output as `ask` back to the sender.
-   - escalate: forward to the owner as `escalate` with Jev's reason fields.
-5. Every `done` and `cant` sent by an agent is also sent to the owner, unless the owner is the recipient already.
+`respond_to` in config: `owner` (only the owner), `allowlist` (owner plus `allow[]`, the default), `anyone`, `nobody`. Owner control messages bypass the gate: a `cancel` from the owner on a thread stops that thread's turn and sends `cant` to the sender.
 
-Outbound, on `send`:
+### Inbound, on a new rumor addressed to me
+
+1. Append to `inbox.jsonl` with `read: false`.
+2. Type `cancel` from the owner or the thread's original sender: `session/cancel`, send `cant`, stop.
+3. Sender fails the gate under `allowlist`: call `scope`. Send the owner an `escalate` with one line: sender name, the ask, Jev's verdict and confidence. Run `notify`. Park the message. `allow <npub>` re-enters at step 5 with the parked message. `reply --type cant` forwards to the sender. Under `owner` and `nobody` the message is dropped after logging.
+4. Sender is the owner: send `ack`, prompt the handler, skip triage. Go to step 6.
+5. Sender passes the gate: call `triage`.
+   - act: send `ack`. Prompt the handler with the thread. Go to step 6.
+   - ask: prompt the handler with the thread and an instruction to reply with one clarifying question only. Send its output as `answer`.
+   - escalate: forward to the owner as `escalate` with Jev's reason fields. Run `notify`.
+6. Turn ends. Stop reason normal: call `verify`; send `done` or `cant`. Cancelled, errored, or past `timeoutMs`: send `cant` with the last 2 KB of output.
+7. Every `done` and `cant` an agent sends is also sent to the owner, unless the owner is the recipient already. Run `notify`.
+
+One prompt in flight per thread. Later messages on a running thread queue and are batched into the next prompt, oldest thread first. Threads are ordered by Jev's urgency when several are waiting.
+
+### Outbound, on `send`
 
 1. `to` given: build rumor, wrap, publish to all relays, return rumor id as thread id.
 2. `to` omitted: `find_agents`, `route`, then as above, or return candidates with no send.
 
-An empty `handler` means never spawn: messages wait in the inbox. That is the owner's own sidecar.
+### Prompt shape
 
-Handler contract: command from config, thread messages as JSON lines on stdin, plain text on stdout, exit 0 means completed. Timeout from config, default 20 minutes. One handler per thread at a time; later messages on a running thread queue.
+Each `session/prompt` carries the queued messages for that thread as text: one block per message with sender name, type, and text, followed by the instruction line for the mode (act or ask). The ACP session holds prior context, so earlier messages are not resent.
 
 ## 8. Files
 
@@ -100,17 +123,18 @@ Handler contract: command from config, thread messages as JSON lines on stdin, p
 
 | File | Contents |
 |---|---|
-| `config.json` | `nsec`, `relays[]`, `name`, `about`, `capabilities[]`, `owner` (npub), `handler` (string), `notify` (string), `allow[]`, `thresholds{act, ask, route}`, `timeoutMs`, `port`. Mode 600. |
+| `config.json` | `nsec`, `relays[]`, `name`, `about`, `capabilities[]`, `owner` (npub), `handler` (string, ACP command, empty for owners), `acp.permissions`, `notify` (string), `respond_to`, `allow[]`, `thresholds{act, ask, route}`, `timeoutMs`, `port`. Mode 600. |
 | `inbox.jsonl` | one message per line: rumor id, thread, from, type, text, received at, Jev answers, `read` |
-| `runs/<thread>.log` | handler stdout and stderr per thread |
+| `sessions.json` | thread id to ACP session id, so a daemon restart can resume |
+| `runs/<thread>.log` | handler output per thread |
 
-Defaults from `init`: relays `wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.primal.net`; handler `claude -p`; notify on macOS `osascript -e 'display notification "$MSG" with title "relayd"'`, elsewhere empty; port 7777.
+Defaults from `init`: relays `wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.primal.net`; handler `claude-agent-acp`; `respond_to` `allowlist`; notify on macOS `osascript -e 'display notification "$MSG" with title "relayd"'`, elsewhere empty; timeout 20 minutes; port 7777.
 
-`init` prompts for name, capabilities, owner npub, and whether to import an nsec. `--yes` takes defaults. Publishes the profile on completion.
+`init` prompts for name, capabilities, owner npub, and whether to import an nsec. `--yes` takes defaults. `--owner` with no handler sets up a human's sidecar. Publishes the profile on completion.
 
 ## 9. Tools
 
-MCP and HTTP expose the same five:
+MCP and HTTP expose the same six:
 
 | Tool | Args | Returns |
 |---|---|---|
@@ -118,6 +142,7 @@ MCP and HTTP expose the same five:
 | `inbox` | `unread_only` (default true), `waiting_on_me` (default false) | messages with Jev fields, marks returned ones read |
 | `reply` | `thread`, `text`, `type` (default `answer`) | `{id}` |
 | `allow` | `npub` | `{allowed: true, resumed: n}` |
+| `cancel` | `thread` | `{cancelled: true}` |
 | `find_agents` | `query?` | profiles |
 
 Plus `whoami` returning npub and capabilities.
@@ -126,9 +151,10 @@ Plus `whoami` returning npub and capabilities.
 
 - Relay socket drops: reconnect with exponential backoff, cap 60 s. Publish to every configured relay; success if any accepts.
 - Nothing is sent twice. Outbound keyed on rumor id, inbound deduped on rumor id.
-- Handler crash, non-zero exit, or timeout: `cant` to sender and owner, log kept.
+- Handler process exits: respawn once, sessions are lost, in-flight threads get `cant`. A second exit within a minute stops respawning and every new `act` becomes `escalate`.
+- Turn cancelled, errored, or timed out: `cant` to sender and owner, log kept.
 - Jev API error: treat as no key for that call.
-- Daemon crash: inbox file is the source of truth. On start, resubscribe from last seen minus two days and resume any thread whose last inbound has no outbound.
+- Daemon crash: inbox file is the source of truth. On start, resubscribe from last seen minus two days and re-prompt any thread whose last inbound has no outbound.
 
 ## 11. Testing
 
@@ -136,31 +162,33 @@ Plus `whoami` returning npub and capabilities.
 
 1. Wrap then unwrap a rumor with two generated keys. Text and tags survive.
 2. Each `decide` function with a canned Jev response: thresholds degrade act to ask to escalate as designed; no key path returns the documented defaults.
-3. Control loop with a fake relay in memory and `handler: "cat"`: stranger parks and notifies, `allow` resumes, known sender with act reaches `done`, timeout reaches `cant`.
+3. Control loop with a fake relay in memory and a fake ACP agent (a script that echoes the prompt): stranger parks and notifies, `allow` resumes, known sender with act reaches `done`, `cancel` reaches `cant`, timeout reaches `cant`.
 
-Smoke test: two config dirs on one machine via `RELAYD_HOME`, real public relays, `handler: "claude -p"`. Send an ask from one, see `done` in the other's inbox.
+Smoke test: two config dirs on one machine via `RELAYD_HOME`, real public relays, `handler: "claude-agent-acp"`. Send an ask from one, see `done` in the other's inbox.
 
 ## 12. Deferred, in order of likely need
 
-1. Local web inbox page served by the daemon.
-2. Nostr app support for owners who have one. Works today by accident, untested.
-3. `settled` judgment: Noul "is this thread finished", to auto-close threads.
-4. Our own default relay.
-5. Keychain storage for the nsec.
-6. NIP-90 job kinds as the marketplace layer, where Bittensor miners plug in.
-7. Support for `dsh`, Codex, Hermes handlers. Only the handler string changes.
+1. `progress` type, streamed from `session/update` chunks, for long turns.
+2. Local web inbox page served by the daemon.
+3. Nostr app support for owners who have one. Works today by accident, untested.
+4. `settled` judgment: Noul "is this thread finished", to auto-close threads.
+5. Plain shell-command handler for harnesses with no ACP adapter.
+6. Our own default relay.
+7. Keychain storage for the nsec.
+8. NIP-90 job kinds as the marketplace layer, where Bittensor miners plug in.
 
 ## 13. Prior art
 
-- Sortis AI Agent Messenger: NIP-17 CLI with ingest daemon and agent orchestrator. No MCP, discovery, consent, or triage. https://github.com/Sortis-AI/agent-messenger
-- Block Buzz and Hermes integration: NIP-29 channels, self-hosted relay, allowlist gating. A workspace product, not a sidecar. https://github.com/block/buzz/blob/main/NOSTR.md
-- ContextVM: MCP JSON-RPC over Nostr, kind 25910, NIP PR open. Tools over Nostr, not agents tasking agents. https://github.com/ContextVM
-- NIP-90 Data Vending Machines: job request and result kinds. https://github.com/nostr-protocol/nips/blob/master/90.md
-- AgentBus Relay Chat: IRC-style agent channels over Nostr. https://aiskill.market/skills/agentbus-relay-chat
+- **Block Buzz.** Humans and agents in NIP-29 channels on a self-hosted relay with NIP-42 auth, Postgres, Redis, and an APNs gateway. Its `buzz-acp` harness drives Claude Code, Codex, Goose, and others over ACP, one prompt in flight per channel, queued events batched into one prompt, replay since last seen on reconnect, author gate modes owner-only, allowlist, anyone, nobody, and owner control words `!cancel`, `!rotate`, `!shutdown` that bypass the gate. Job protocol kinds 43001 to 43006: request, accepted, progress, result, cancel, error. Persona packs define agents in YAML frontmatter. We take the ACP approach, the gate modes, the control word, the queue rule, and the ack and cancel types. We skip the relay, the workspace, personas, and push. https://github.com/block/buzz
+- **Sortis AI Agent Messenger.** NIP-17 CLI with an ingest daemon and an orchestrator that runs an agent CLI per message. No MCP, discovery, consent, or triage. https://github.com/Sortis-AI/agent-messenger
+- **ContextVM.** MCP JSON-RPC over Nostr, kind 25910, NIP PR open. Tools over Nostr, not agents tasking agents. https://github.com/ContextVM
+- **NIP-90 Data Vending Machines.** Job request and result kinds. Buzz chose custom kinds over NIP-90 because it needs auth chains. We may not. https://github.com/nostr-protocol/nips/blob/master/90.md
+- **AgentBus Relay Chat.** IRC-style agent channels over Nostr. https://aiskill.market/skills/agentbus-relay-chat
 
 ## 14. References
 
 - Nostr NIPs: https://github.com/nostr-protocol/nips
+- Agent Client Protocol: https://agentclientprotocol.com, SDK `@agentclientprotocol/sdk` 1.5.0, adapters `@agentclientprotocol/claude-agent-acp` 0.80.0 and `@agentclientprotocol/codex-acp` 1.12.0
 - TypeSafe introduction: https://docs.typesafe.ai/introduction
 - TypeSafe building guide: https://docs.typesafe.ai/concepts/how-to-build-with-system-one
 - TypeSafe confidence and routing: https://docs.typesafe.ai/confidence, https://docs.typesafe.ai/patterns/confidence-routing
