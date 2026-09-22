@@ -2,7 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const NAME = "relayd";
+export const NAME = "sidecar";
+export const PKG = "@fezchat/sidecar";
 
 export type RespondTo = "owner" | "allowlist" | "anyone" | "nobody";
 
@@ -25,7 +26,7 @@ export interface Config {
 }
 
 export function home(): string {
-  return process.env.RELAYD_HOME ?? path.join(os.homedir(), `.${NAME}`);
+  return process.env.SIDECAR_HOME ?? path.join(os.homedir(), `.${NAME}`);
 }
 
 export function defaultConfig(overrides: Partial<Config> & { nsec: string; name: string }): Config {
@@ -55,7 +56,7 @@ export function loadConfig(): Config {
   try {
     return JSON.parse(fs.readFileSync(file(), "utf8")) as Config;
   } catch {
-    throw new Error(`no config at ${file()}. Run: npx ${NAME} init`);
+    throw new Error(`no config at ${file()}. Run: npx ${PKG} init`);
   }
 }
 

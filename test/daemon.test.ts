@@ -51,7 +51,7 @@ const actAsk: Ask = async (_s, q): Promise<Record<string, Answer> | null> => {
 };
 
 function setup(over: Partial<Config> = {}, ask: Ask = actAsk) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "relayd-d-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-d-"));
   const me = secretFromNsec(generateNsec());
   const owner = secretFromNsec(generateNsec());
   const friend = secretFromNsec(generateNsec());

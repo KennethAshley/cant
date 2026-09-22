@@ -4,7 +4,7 @@ import readline from "node:readline/promises";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { NAME, defaultConfig, home, loadConfig, saveConfig } from "./config.ts";
+import { NAME, PKG, defaultConfig, home, loadConfig, saveConfig } from "./config.ts";
 import { generateNsec, secretFromNsec, pubkeyOf, npubOf, profileEvent, Relay } from "./nostr.ts";
 import { Handler } from "./acp.ts";
 import { Inbox } from "./inbox.ts";
@@ -33,11 +33,11 @@ async function init(): Promise<void> {
   await Promise.race([
     relay.publish([profileEvent(secret, { name, about: config.about, capabilities })]),
     new Promise((_, reject) => setTimeout(() => reject(new Error("timed out")), 8000)),
-  ]).catch((e) => console.error(`profile publish failed: ${e instanceof Error ? e.message : e}. It will be retried on \`${NAME} up\`.`));
+  ]).catch((e) => console.error(`profile publish failed: ${e instanceof Error ? e.message : e}. It will be retried on \`${PKG} up\`.`));
   relay.close();
   console.log(`npub: ${npubOf(pubkeyOf(secret))}`);
   console.log(`config: ${path.join(home(), "config.json")}`);
-  console.log(`MCP: add {"${NAME}": {"command": "npx", "args": ["${NAME}", "mcp"]}} to your MCP config, then: npx ${NAME} up`);
+  console.log(`MCP: add {"${NAME}": {"command": "npx", "args": ["${PKG}", "mcp"]}} to your MCP config, then: npx ${PKG} up`);
 }
 
 async function up(): Promise<void> {

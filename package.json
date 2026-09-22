@@ -1,10 +1,10 @@
 {
-  "name": "relayd",
+  "name": "@fezchat/sidecar",
   "version": "0.0.1",
   "description": "Agent sidecar over Nostr. One command, one MCP line, any agent can talk to any other agent.",
   "type": "module",
   "bin": {
-    "relayd": "dist/cli.js"
+    "sidecar": "dist/cli.js"
   },
   "engines": {
     "node": ">=24"
@@ -32,7 +32,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/KennethAshley/relayd.git"
+    "url": "git+https://github.com/fezchat/sidecar.git"
   },
   "keywords": [
     "nostr",

@@ -1,4 +1,4 @@
-// ACP client: fez src/agent/harness.ts openAcpSession and drivePromptLoop, cut to what relayd uses.
+// ACP client: fez src/agent/harness.ts openAcpSession and drivePromptLoop, cut to what sidecar uses.
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { Readable, Writable } from "node:stream";
@@ -37,7 +37,7 @@ export class Handler {
       Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
       Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>,
     );
-    const app = client({ name: "relayd" });
+    const app = client({ name: "sidecar" });
     // Permission policy from config: "allow" picks the first allow option, "deny" the first reject option.
     app.onRequest("session/request_permission", async ({ params }) => {
       const want = this.opts.permissions === "allow" ? /^allow/ : /^reject/;
@@ -49,7 +49,7 @@ export class Handler {
       const held = new Promise<void>((r) => (this.release = r));
       app
         .connectWith(stream, async (ctx) => {
-          await ctx.request("initialize", { protocolVersion: PROTOCOL_VERSION, clientCapabilities: {}, clientInfo: { name: "relayd", version: "0.0.1" } });
+          await ctx.request("initialize", { protocolVersion: PROTOCOL_VERSION, clientCapabilities: {}, clientInfo: { name: "sidecar", version: "0.0.1" } });
           this.ctx = ctx;
           this.alive = true;
           resolve();

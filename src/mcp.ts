@@ -21,14 +21,14 @@ async function ensureDaemon(port: number): Promise<void> {
     await new Promise((r) => setTimeout(r, 200));
     if (await up()) return;
   }
-  throw new Error("relayd daemon did not start; run `relayd up --foreground` to see why");
+  throw new Error("sidecar daemon did not start; run `npx @fezchat/sidecar up --foreground` to see why");
 }
 
 /** Every tool forwards to the daemon over localhost HTTP. The harness never sees Nostr. */
 export async function serveMcp(): Promise<void> {
   const { port } = loadConfig();
   await ensureDaemon(port);
-  const server = new McpServer({ name: "relayd", version: "0.0.1" });
+  const server = new McpServer({ name: "sidecar", version: "0.0.1" });
   const text = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(v, null, 2) }] });
   const call = (method: Rpc) => async (args: Record<string, unknown>) => text(await rpc(port, method, args));
 

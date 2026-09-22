@@ -6,7 +6,7 @@ import path from "node:path";
 import { Inbox } from "../src/inbox.ts";
 import type { Message } from "../src/nostr.ts";
 
-const dir = () => fs.mkdtempSync(path.join(os.tmpdir(), "relayd-inbox-"));
+const dir = () => fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-inbox-"));
 const m = (id: string, extra: Partial<Message> = {}): Message =>
   ({ id, thread: extra.thread ?? id, from: "a", to: "b", type: "ask", text: id, depth: 0, ts: 1, ...extra });
 

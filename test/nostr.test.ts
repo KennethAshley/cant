@@ -58,7 +58,7 @@ test("profile event round-trips and carries the t tag", () => {
   const a = secretFromNsec(generateNsec());
   const ev = profileEvent(a, { name: "bot", about: "does things", capabilities: ["review", "docs"] });
   assert.equal(ev.kind, 0);
-  assert.ok(ev.tags.some((t) => t[0] === "t" && t[1] === "relayd"));
+  assert.ok(ev.tags.some((t) => t[0] === "t" && t[1] === "sidecar"));
   const p = parseProfile(ev);
   assert.deepEqual(p, { pubkey: pubkeyOf(a), name: "bot", about: "does things", capabilities: ["review", "docs"] });
 });

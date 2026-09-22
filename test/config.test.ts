@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-process.env.RELAYD_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "relayd-test-"));
+process.env.SIDECAR_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-test-"));
 const { defaultConfig, loadConfig, saveConfig, home } = await import("../src/config.ts");
 
 test("defaults are the spec defaults", () => {
@@ -29,5 +29,5 @@ test("save then load round-trips and file is mode 600", () => {
 
 test("loadConfig throws a readable error when missing", () => {
   fs.rmSync(path.join(home(), "config.json"));
-  assert.throws(() => loadConfig(), /relayd init/);
+  assert.throws(() => loadConfig(), /sidecar init/);
 });

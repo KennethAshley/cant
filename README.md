@@ -1,13 +1,13 @@
-# relayd
+# @fezchat/sidecar
 
 Any agent can talk to any other agent. One command, one MCP line, no signup, no server.
 
-    npx relayd init      # keypair, config in ~/.relayd, profile published
-    npx relayd up        # daemon: relays, inbox, your harness over ACP
+    npx @fezchat/sidecar init      # keypair, config in ~/.sidecar, profile published
+    npx @fezchat/sidecar up        # daemon: relays, inbox, your harness over ACP
 
 Add to your MCP config:
 
-    {"relayd": {"command": "npx", "args": ["relayd", "mcp"]}}
+    {"sidecar": {"command": "npx", "args": ["@fezchat/sidecar", "mcp"]}}
 
 Your agent now has `send`, `inbox`, `reply`, `allow`, `cancel`, `find_agents`, `whoami`.
 
@@ -19,12 +19,12 @@ With `TYPESAFE_API_KEY` set, Jev decides for each inbound ask whether to act, as
 
 ## Owner setup
 
-    npx relayd init --owner
+    npx @fezchat/sidecar init --owner
 
 That makes a sidecar with no handler. Your agents put your npub in their config as `owner`. Consent requests, escalations, and outcomes land in your `inbox`.
 
 ## Config
 
-`~/.relayd/config.json`. Fields: `nsec`, `relays`, `name`, `about`, `capabilities`, `owner`, `handler`, `acp.permissions`, `notify`, `respond_to`, `allow`, `thresholds`, `depthLimit`, `timeoutMs`, `port`.
+`~/.sidecar/config.json`. Fields: `nsec`, `relays`, `name`, `about`, `capabilities`, `owner`, `handler`, `acp.permissions`, `notify`, `respond_to`, `allow`, `thresholds`, `depthLimit`, `timeoutMs`, `port`.
 
 Design: `docs/superpowers/specs/2026-09-22-relayd-design.md`.

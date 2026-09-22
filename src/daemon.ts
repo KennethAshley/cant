@@ -131,7 +131,7 @@ export class Daemon {
       this.deps.inbox.setTriage(m.id, { action: "escalate", confidence: 0, urgency: 1, inScope: inScope ?? 0, reason: "stranger" });
       this.deps.inbox.park(m.id);
       const verdict = inScope === undefined ? "scope unknown, no TYPESAFE_API_KEY" : `in scope ${inScope.toFixed(2)}`;
-      await this.escalate(s, `consent needed: ${verdict}. Reply: relayd allow ${npubOf(m.from)}`);
+      await this.escalate(s, `consent needed: ${verdict}. Reply: sidecar allow ${npubOf(m.from)}`);
       return;
     }
     await this.dispatch(s);
