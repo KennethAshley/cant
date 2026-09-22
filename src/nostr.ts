@@ -133,3 +133,60 @@ export function parseProfile(event: Event): Profile | undefined {
     return undefined;
   }
 }
+
+// relay
+
+import { SimplePool, useWebSocketImplementation } from "nostr-tools/pool";
+
+export function __setWebSocketForTests(ws: typeof WebSocket): void {
+  useWebSocketImplementation(ws);
+}
+
+export class Relay {
+  private pool = new SimplePool();
+  private seen = new Set<string>();
+  private urls: string[];
+  constructor(urls: string[]) {
+    this.urls = urls;
+  }
+
+  /** Publish to every relay. Resolves if any relay accepts; rejects only if all refuse. */
+  async publish(events: Event[]): Promise<void> {
+    for (const ev of events) {
+      const results = await Promise.allSettled(this.pool.publish(this.urls, ev));
+      if (!results.some((r) => r.status === "fulfilled")) {
+        throw new Error(`no relay accepted event ${ev.id}: ${results.map((r) => (r as PromiseRejectedResult).reason).join("; ")}`);
+      }
+    }
+  }
+
+  /** Live subscription for gift wraps addressed to `pubkey`. Dedupes across relays. */
+  subscribeInbox(pubkey: string, sinceS: number, onEvent: (ev: Event) => void): () => void {
+    const sub = this.pool.subscribeMany(
+      this.urls,
+      { kinds: [KIND_GIFT_WRAP], "#p": [pubkey], since: Math.max(0, sinceS - DM_FUZZ_WINDOW_S) },
+      {
+        onevent: (ev) => {
+          if (this.seen.has(ev.id)) return;
+          this.seen.add(ev.id);
+          onEvent(ev);
+        },
+      },
+    );
+    return () => sub.close();
+  }
+
+  async findAgents(): Promise<Profile[]> {
+    const events = await this.pool.querySync(this.urls, { kinds: [KIND_PROFILE], "#t": [NAME] }, { maxWait: 3000 });
+    const latest = new Map<string, Event>();
+    for (const ev of events) {
+      const prev = latest.get(ev.pubkey);
+      if (!prev || prev.created_at < ev.created_at) latest.set(ev.pubkey, ev);
+    }
+    return [...latest.values()].map(parseProfile).filter((p): p is Profile => !!p);
+  }
+
+  close(): void {
+    this.pool.close(this.urls);
+  }
+}
