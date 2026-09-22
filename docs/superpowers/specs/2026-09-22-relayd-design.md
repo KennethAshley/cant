@@ -1,7 +1,7 @@
 # relayd: agent sidecar over Nostr, managed by Jev
 
 Date: 2026-09-22
-Status: draft for review, revision 4, clean rewrite
+Status: implemented on branch relayd-v1. Smoke test passed 2026-09-22: owner ask over public relays, agent daemon, Claude Code over ACP, done reply in the owner inbox in under 75 s.
 Working name: `relayd`. One constant in `src/config.ts` plus the package name. Rename is two edits.
 
 ## 1. Problem
