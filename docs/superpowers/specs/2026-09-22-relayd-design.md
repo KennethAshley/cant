@@ -1,7 +1,7 @@
 # relayd: agent sidecar over Nostr, managed by Jev
 
 Date: 2026-09-22
-Status: draft for review, revision 2 after reading Buzz
+Status: draft for review, revision 3 after reading Buzz and fez
 Working name: `relayd`. One constant in `src/config.ts` plus the package name. Rename is two edits.
 
 ## 1. Problem
@@ -57,6 +57,7 @@ Rumor tags:
 | `p` | recipient pubkey |
 | `e` | thread root rumor id, omitted on the first message of a thread |
 | `type` | one of the seven below |
+| `depth` | agent-to-agent hop count, omitted when a human originated the thread. A sidecar refuses to act on `depth` ≥ 3 and sends `cant`. Loop guard, from fez. |
 
 | Type | Sent by | Meaning |
 |---|---|---|
@@ -177,15 +178,29 @@ Smoke test: two config dirs on one machine via `RELAYD_HOME`, real public relays
 7. Keychain storage for the nsec.
 8. NIP-90 job kinds as the marketplace layer, where Bittensor miners plug in.
 
-## 13. Prior art
+## 13. Lifted from fez
+
+`~/Projects/Fez/fez` is the same idea at 15k core lines plus 60k in packages. relayd copies four files out of it and imports nothing. Copy, not depend, so relayd stays one small package with no path back to the bloat.
+
+| Take | From | Lines | Change |
+|---|---|---|---|
+| NIP-17 wrap and unwrap, self-copy, fuzz window, seal verification | `src/protocol/dm.ts` | 155 | add the `type` and `e` tags, keep `depth` |
+| ACP client: spawn, `initialize`, `session/new`, `session/prompt` with streamed updates | `src/agent/harness.ts` around lines 780 to 950 | about 150 | drop fez's pool, workspaces, and memory prompt |
+| TypeSafe Choice call with response validation | `packages/fez-orchestrator/src/typesafe.ts` | 75 | base of `decide.ts`, add Score and Noul |
+| Relay reconnect with backoff and per-relay health | `src/protocol/relay.ts` | up to 100 of 625 | only if `SimplePool` from nostr-tools proves flaky |
+
+Not taken: fez's 47xxx custom kinds and public task events (relayd uses DMs and kind 0), personas, extensions, communities, keychain (deferred), the TUI and desktop.
+
+## 14. Prior art
 
 - **Block Buzz.** Humans and agents in NIP-29 channels on a self-hosted relay with NIP-42 auth, Postgres, Redis, and an APNs gateway. Its `buzz-acp` harness drives Claude Code, Codex, Goose, and others over ACP, one prompt in flight per channel, queued events batched into one prompt, replay since last seen on reconnect, author gate modes owner-only, allowlist, anyone, nobody, and owner control words `!cancel`, `!rotate`, `!shutdown` that bypass the gate. Job protocol kinds 43001 to 43006: request, accepted, progress, result, cancel, error. Persona packs define agents in YAML frontmatter. We take the ACP approach, the gate modes, the control word, the queue rule, and the ack and cancel types. We skip the relay, the workspace, personas, and push. https://github.com/block/buzz
+- **fez, `@fezchat/protocol`.** Our own earlier take: agents by name over Nostr, NIP-17 DMs, ACP harness, TypeSafe route choice, owner-only, anyone, or allowlist summon gating, depth-tag loop guards. Grew into a workspace with a relay, desktop, wallet, git, and 50 packages. relayd is the thin core of it, restarted. See section 13. https://github.com/KennethAshley/fez
 - **Sortis AI Agent Messenger.** NIP-17 CLI with an ingest daemon and an orchestrator that runs an agent CLI per message. No MCP, discovery, consent, or triage. https://github.com/Sortis-AI/agent-messenger
 - **ContextVM.** MCP JSON-RPC over Nostr, kind 25910, NIP PR open. Tools over Nostr, not agents tasking agents. https://github.com/ContextVM
 - **NIP-90 Data Vending Machines.** Job request and result kinds. Buzz chose custom kinds over NIP-90 because it needs auth chains. We may not. https://github.com/nostr-protocol/nips/blob/master/90.md
 - **AgentBus Relay Chat.** IRC-style agent channels over Nostr. https://aiskill.market/skills/agentbus-relay-chat
 
-## 14. References
+## 15. References
 
 - Nostr NIPs: https://github.com/nostr-protocol/nips
 - Agent Client Protocol: https://agentclientprotocol.com, SDK `@agentclientprotocol/sdk` 1.5.0, adapters `@agentclientprotocol/claude-agent-acp` 0.80.0 and `@agentclientprotocol/codex-acp` 1.12.0
