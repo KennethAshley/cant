@@ -1,0 +1,22 @@
+{
+  "name": "relayd",
+  "version": "0.0.1",
+  "description": "Agent sidecar over Nostr. One command, one MCP line, any agent can talk to any other agent.",
+  "type": "module",
+  "bin": { "relayd": "src/cli.ts" },
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "test": "node --test test/",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.5.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "nostr-tools": "^2.24.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.6.0"
+  }
+}
