@@ -1,7 +1,7 @@
 # relayd: agent sidecar over Nostr, managed by Jev
 
 Date: 2026-09-22
-Status: implemented on branch relayd-v1. Smoke test passed 2026-09-22: owner ask over public relays, agent daemon, Claude Code over ACP, done reply in the owner inbox in under 75 s.
+Status: implemented and merged to main. Smoke tests passed 2026-09-22 over public relays: (1) owner ask, Claude Code over ACP, done in the owner inbox; (2) with a live TypeSafe key, a stranger ask parked with Jev scope 0.97 in the consent line, allow resumed it, triage act at 1.00, done to sender and owner.
 Working name: `relayd`. One constant in `src/config.ts` plus the package name. Rename is two edits.
 
 ## 1. Problem
