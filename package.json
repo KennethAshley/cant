@@ -6,7 +6,7 @@
   "bin": { "relayd": "src/cli.ts" },
   "engines": { "node": ">=24" },
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test \"test/*.test.ts\"",
     "check": "tsc --noEmit"
   },
   "dependencies": {
