@@ -16,7 +16,7 @@ export async function rpc(port: number, method: Rpc, args: Record<string, unknow
 async function ensureDaemon(port: number): Promise<void> {
   const up = () => fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok).catch(() => false);
   if (await up()) return;
-  spawn(process.execPath, [new URL("./cli.ts", import.meta.url).pathname, "up"], { detached: true, stdio: "ignore" }).unref();
+  spawn(process.execPath, [process.argv[1], "up"], { detached: true, stdio: "ignore" }).unref();
   for (let i = 0; i < 25; i++) {
     await new Promise((r) => setTimeout(r, 200));
     if (await up()) return;
