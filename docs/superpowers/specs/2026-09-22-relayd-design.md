@@ -83,12 +83,14 @@ Inbound, on a new rumor addressed to me:
    - act: send `answer` "Got it, working." Spawn handler with the thread as stdin. On exit 0 call `verify`; send `done` or `cant`. On non-zero exit or timeout send `cant` with the last 2 KB of stderr.
    - ask: spawn handler with the thread and an instruction to reply with a clarifying question only. Send its output as `ask` back to the sender.
    - escalate: forward to the owner as `escalate` with Jev's reason fields.
-5. Every `done` and `cant` sent by an agent is also sent to the owner.
+5. Every `done` and `cant` sent by an agent is also sent to the owner, unless the owner is the recipient already.
 
 Outbound, on `send`:
 
 1. `to` given: build rumor, wrap, publish to all relays, return rumor id as thread id.
 2. `to` omitted: `find_agents`, `route`, then as above, or return candidates with no send.
+
+An empty `handler` means never spawn: messages wait in the inbox. That is the owner's own sidecar.
 
 Handler contract: command from config, thread messages as JSON lines on stdin, plain text on stdout, exit 0 means completed. Timeout from config, default 20 minutes. One handler per thread at a time; later messages on a running thread queue.
 
