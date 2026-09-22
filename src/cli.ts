@@ -14,15 +14,19 @@ import { rpc, serveMcp } from "./mcp.ts";
 const [cmd, ...rest] = process.argv.slice(2);
 
 async function init(): Promise<void> {
-  const { values } = parseArgs({ args: rest, options: { yes: { type: "boolean" }, owner: { type: "boolean" }, name: { type: "string" }, nsec: { type: "string" } } });
+  const { values } = parseArgs({ args: rest, options: { yes: { type: "boolean" }, owner: { type: "boolean" }, name: { type: "string" }, nsec: { type: "string" }, "owner-npub": { type: "string" }, capabilities: { type: "string" }, handler: { type: "string" }, port: { type: "string" } } });
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const ask = async (q: string, d: string) => (values.yes ? d : (await rl.question(`${q} [${d}]: `)) || d);
   const name = values.name ?? (await ask("name", "agent"));
-  const capabilities = values.owner ? [] : (await ask("capabilities, comma separated", "")).split(",").map((s) => s.trim()).filter(Boolean);
-  const ownerNpub = values.owner ? "" : await ask("owner npub, blank for none", "");
+  const capabilities = values.owner ? [] : (values.capabilities ?? (await ask("capabilities, comma separated", ""))).split(",").map((s) => s.trim()).filter(Boolean);
+  const ownerNpub = values.owner ? "" : (values["owner-npub"] ?? (await ask("owner npub, blank for none", "")));
   const nsec = values.nsec ?? ((await ask("nsec to import, blank to generate", "")) || generateNsec());
   rl.close();
-  const config = defaultConfig({ nsec, name, capabilities, owner: ownerNpub || undefined, handler: values.owner ? "" : "claude-agent-acp" });
+  const config = defaultConfig({
+    nsec, name, capabilities, owner: ownerNpub || undefined,
+    handler: values.owner ? "" : (values.handler ?? "npx -y @agentclientprotocol/claude-agent-acp"),
+    ...(values.port ? { port: Number(values.port) } : {}),
+  });
   saveConfig(config);
   const secret = secretFromNsec(nsec);
   const relay = new Relay(config.relays);
@@ -87,7 +91,7 @@ const commands: Record<string, () => Promise<void>> = {
 
 const run = commands[cmd ?? ""];
 if (!run) {
-  console.log(`usage: ${NAME} <init [--yes] [--owner] [--name n] [--nsec k] | up [--foreground] | mcp | whoami | inbox [--waiting] [--all] | reply <thread> <text> [--type t] | allow <npub> | cancel <thread>>`);
+  console.log(`usage: ${NAME} <init [--yes] [--owner] [--name n] [--nsec k] [--owner-npub npub] [--capabilities a,b] [--handler cmd] [--port n] | up [--foreground] | mcp | whoami | inbox [--waiting] [--all] | reply <thread> <text> [--type t] | allow <npub> | cancel <thread>>`);
   process.exit(cmd ? 1 : 0);
 }
 run().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });

@@ -33,7 +33,7 @@ export function defaultConfig(overrides: Partial<Config> & { nsec: string; name:
     relays: ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net"],
     about: "",
     capabilities: [],
-    handler: "claude-agent-acp",
+    handler: "npx -y @agentclientprotocol/claude-agent-acp",
     acp: { permissions: "allow" },
     notify:
       process.platform === "darwin"
