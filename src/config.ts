@@ -19,6 +19,9 @@ export interface Config {
   /** Shared Jev gateway; this is a client credential, never the TypeSafe provider key. */
   judge?: { url: string; key: string };
   handler: string;
+  protocol?: "acp" | "pi";
+  /** Working directory captured during interactive setup. */
+  cwd?: string;
   acp: { permissions: "allow" | "deny" };
   notify: string;
   respond_to: RespondTo;
@@ -29,8 +32,14 @@ export interface Config {
   port: number;
 }
 
-export function home(): string {
+export function baseHome(): string {
   return process.env.SIDECAR_HOME ?? path.join(os.homedir(), `.${NAME}`);
+}
+
+export function home(agent = process.env.SIDECAR_AGENT): string {
+  if (agent === undefined || agent === "default") return baseHome();
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(agent)) throw new Error("agent name must be 1–64 lowercase letters, numbers, hyphens or underscores");
+  return path.join(baseHome(), "agents", agent);
 }
 
 export function defaultConfig(overrides: Partial<Config> & { nsec: string; name: string }): Config {
@@ -64,8 +73,8 @@ export function loadConfig(): Config {
   }
 }
 
-export function saveConfig(c: Config): void {
+export function saveConfig(c: Config, options: { exclusive?: boolean } = {}): void {
   fs.mkdirSync(home(), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(file(), JSON.stringify(c, null, 2) + "\n", { mode: 0o600 });
+  fs.writeFileSync(file(), JSON.stringify(c, null, 2) + "\n", { mode: 0o600, flag: options.exclusive ? "wx" : "w" });
   fs.chmodSync(file(), 0o600);
 }

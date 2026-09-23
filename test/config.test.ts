@@ -31,3 +31,29 @@ test("loadConfig throws a readable error when missing", () => {
   fs.rmSync(path.join(home(), "config.json"));
   assert.throws(() => loadConfig(), /sidecar init/);
 });
+
+test("named agents keep their keys and inboxes separate from the legacy default", () => {
+  const root = home();
+  saveConfig(defaultConfig({ nsec: "legacy-key", name: "legacy" }));
+  try {
+    process.env.SIDECAR_AGENT = "mini-pi";
+    assert.equal(home(), path.join(root, "agents", "mini-pi"));
+    saveConfig(defaultConfig({ nsec: "pi-key", name: "mini-pi" }));
+    process.env.SIDECAR_AGENT = "mini-claude";
+    assert.throws(() => loadConfig());
+    saveConfig(defaultConfig({ nsec: "claude-key", name: "mini-claude" }));
+    process.env.SIDECAR_AGENT = "mini-pi";
+    assert.equal(loadConfig().nsec, "pi-key");
+    delete process.env.SIDECAR_AGENT;
+    assert.equal(loadConfig().nsec, "legacy-key");
+  } finally { delete process.env.SIDECAR_AGENT; }
+});
+
+test("an agent name cannot escape its configuration directory", () => {
+  try {
+    for (const name of ["../other", "a/b", "/tmp/other", "..", "", "has spaces"]) {
+      process.env.SIDECAR_AGENT = name;
+      assert.throws(() => home(), /agent name/i);
+    }
+  } finally { delete process.env.SIDECAR_AGENT; }
+});

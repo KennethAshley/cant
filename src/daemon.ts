@@ -349,7 +349,7 @@ export class Daemon {
 
 export type Rpc = "send" | "inbox" | "reply" | "allow" | "cancel" | "find_agents" | "whoami" | "timeline" | "react";
 
-export function serveHttp(daemon: Daemon, port: number): Promise<() => void> {
+export function serveHttp(daemon: Daemon, port: number, ready = () => true): Promise<() => void> {
   const server = http.createServer(async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -366,7 +366,8 @@ export function serveHttp(daemon: Daemon, port: number): Promise<() => void> {
       const [type, body] = assets[req.url!];
       res.writeHead(200, { "content-type": `${type}; charset=utf-8` }); res.end(body); return;
     }
-    if (req.method === "GET" && req.url === "/health") return json(200, { ok: true, ...daemon.whoami() });
+    if (req.method === "GET" && req.url === "/health") return json(ready() ? 200 : 503, { ok: ready(), ...daemon.whoami() });
+    if (!ready()) return json(503, { error: "agent is starting" });
     if (req.method !== "POST" || req.url !== "/rpc") return json(404, { error: "not found" });
     try {
       let raw = "";

@@ -1,8 +1,11 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { loadConfig } from "./config.ts";
+import { home, loadConfig, type Config } from "./config.ts";
+import { agentStatus } from "./picker.ts";
 import type { Rpc } from "./daemon.ts";
 import { MESSAGE_TYPES } from "./nostr.ts";
 
@@ -13,21 +16,36 @@ export async function rpc(port: number, method: Rpc, args: Record<string, unknow
   return body.result;
 }
 
-async function ensureDaemon(port: number): Promise<void> {
-  const up = () => fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok).catch(() => false);
-  if (await up()) return;
-  spawn(process.execPath, [process.argv[1], "up"], { detached: true, stdio: "ignore" }).unref();
-  for (let i = 0; i < 25; i++) {
-    await new Promise((r) => setTimeout(r, 200));
-    if (await up()) return;
+export async function ensureDaemon(config: Config = loadConfig()): Promise<void> {
+  const status = await agentStatus(config);
+  if (status === "running") return;
+  if (status === "occupied") throw new Error(`Port ${config.port} belongs to another service. Run the picker to choose a free port.`);
+  const logFile = path.join(home(), "daemon.log");
+  let child: ReturnType<typeof spawn> | undefined;
+  let failed = false;
+  if (status === "stopped") {
+    const log = fs.openSync(logFile, "a", 0o600);
+    child = spawn(process.execPath, [...process.execArgv, process.argv[1], "up", "--foreground"], { detached: true, stdio: ["ignore", log, log] });
+    fs.closeSync(log);
+    child.on("error", () => { failed = true; });
+    child.unref();
   }
-  throw new Error("sidecar daemon did not start; run `npx @fezchat/sidecar up --foreground` to see why");
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 200));
+    const current = await agentStatus(config);
+    if (current === "running") return;
+    if (current === "occupied" || (current === "stopped" && (!child || failed || child.exitCode !== null || child.signalCode !== null))) break;
+  }
+  child?.kill();
+  throw new Error(`Agent did not start. Details: ${logFile}`);
 }
 
 /** Every tool forwards to the daemon over localhost HTTP. The harness never sees Nostr. */
 export async function serveMcp(): Promise<void> {
-  const { port } = loadConfig();
-  await ensureDaemon(port);
+  const config = loadConfig();
+  const { port } = config;
+  await ensureDaemon(config);
   const server = new McpServer({ name: "sidecar", version: "0.0.1" });
   const text = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(v, null, 2) }] });
   const call = (method: Rpc) => async (args: Record<string, unknown>) => text(await rpc(port, method, args));

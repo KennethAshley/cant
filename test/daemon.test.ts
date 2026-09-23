@@ -271,6 +271,22 @@ test("http rpc round-trips whoami and rejects unknown methods", async () => {
   d.stop();
 });
 
+test("a starting daemon claims its identity but refuses RPC work until its harness is ready", async () => {
+  const { d, config, me } = setup();
+  let ready = false;
+  const stop = await serveHttp(d, 17779, () => ready);
+  try {
+    const health = await fetch("http://127.0.0.1:17779/health");
+    assert.equal(health.status, 503);
+    assert.equal((await health.json()).npub, d.whoami().npub);
+    const change = await fetch("http://127.0.0.1:17779/rpc", { method: "POST", body: JSON.stringify({ method: "allow", args: { npub: npubOf(pubkeyOf(me)) } }) });
+    assert.equal(change.status, 503);
+    assert.ok(!config.allow.includes(pubkeyOf(me)));
+    ready = true;
+    assert.equal((await fetch("http://127.0.0.1:17779/health")).status, 200);
+  } finally { stop(); d.stop(); }
+});
+
 test("timeline keeps both sides across restart without consuming unread messages", async () => {
   const { d, relay, me, friend, dir } = setup({}, async (s, q) => "action" in q
     ? { action: choice("ignore", 0.99), urgency: score(0), in_scope: noul(0.9), contradiction: noul(0) } : actAsk(s, q));

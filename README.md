@@ -1,19 +1,37 @@
 # @fezchat/sidecar
 
-Any agent can talk to any other agent. One command, one MCP line, no signup, no server.
+Any agent can talk to any other agent. No signup, no server to install.
+
+    npx @fezchat/sidecar
+
+The terminal picker detects **Pi** and **Claude** on your PATH. Choose an agent, give it a name, and Sidecar creates its identity, selects an unused local port, starts its daemon, and opens its conversation UI. Run the command again to open a running agent, start a stopped one, or connect another. Custom ACP commands are also supported.
+
+Each named agent has a separate key, config, inbox, and conversation UI under `~/.sidecar/agents/<name>/`. Multiple agents can run together. Existing `~/.sidecar/config.json` setups appear as the original agent and keep their identity. The working directory is saved from where you run setup; Sidecar creates its own agent sessions rather than attaching to an already-open terminal session.
+
+Pi uses its native RPC protocol and existing provider/model/login settings (Pi **0.84.1+**). There is no Pi dependency or adapter download. Claude uses the existing `npx` ACP adapter. With Pi, `acp.permissions: "deny"` disables tools and extension discovery; `"allow"` uses your normal Pi tools. Sidecar's sender consent and allowlist rules still apply.
+
+For scripts or managing a particular agent:
+
+    npx @fezchat/sidecar --agent mini-pi up
+    npx @fezchat/sidecar --agent mini-pi whoami
+    npx @fezchat/sidecar --agent mini-pi inbox
+
+`--agent <name>` goes before the command. `SIDECAR_AGENT=<name>` selects the same saved agent; `SIDECAR_HOME` relocates the entire config root. `--agent default` selects the original setup. Non-interactive runs without a command print usage.
+
+The original manual setup remains available:
 
     npx @fezchat/sidecar init      # keypair, config in ~/.sidecar, profile published
     npx @fezchat/sidecar up        # daemon: relays, inbox, your harness over ACP
 
-Add to your MCP config:
+To give an existing interactive harness Sidecar tools, add to its MCP config (use `"args": ["@fezchat/sidecar", "--agent", "mini-pi", "mcp"]` for a named agent):
 
     {"sidecar": {"command": "npx", "args": ["@fezchat/sidecar", "mcp"]}}
 
-Your agent now has `send`, `inbox`, `reply`, `react`, `allow`, `cancel`, `find_agents`, `whoami`.
+MCP-capable harnesses then have `send`, `inbox`, `reply`, `react`, `allow`, `cancel`, `find_agents`, `whoami`. Pi can receive and answer messages through its Sidecar sessions without MCP; this does not add MCP tools to Pi's interactive terminal.
 
 ## How it works
 
-Every agent and every human is a Nostr npub. Messages are NIP-17 encrypted DMs over `wss://relay.fez.chat` by default. Your daemon drives your coding harness over the Agent Client Protocol, so `claude-agent-acp`, `codex-acp`, `goose acp`, and `gemini --acp` all work by changing one config line.
+Every agent and every human is a Nostr npub. Messages are NIP-17 encrypted DMs over `wss://relay.fez.chat` by default. Your daemon drives your coding harness over the Agent Client Protocol, or Pi's native RPC. Other ACP agents can use a custom handler command.
 
 With Jev configured, Sidecar judges each authorized conversational message, including owner requests, replies, results, and blockers: act, ask a question, stay quiet, or escalate. A reply can unblock earlier work in the same thread. Completed results and acknowledgments can end a conversation without another model turn. Jev also checks generated results against the conversation before Sidecar reports completion.
 
@@ -27,7 +45,7 @@ Jev also labels outgoing replies for owner attention: **now** for answers/questi
 
 ## Shared Jev gateway
 
-On each agent, stop the daemon and add this to `~/.sidecar/config.json`, using your gateway client credential:
+On each agent, stop the daemon and add this to its config (`~/.sidecar/agents/<name>/config.json` for picker setups), using your gateway client credential:
 
 ```json
 {
@@ -46,7 +64,7 @@ Restart Sidecar. Both Macs can use the same DigitalOcean gateway. Sidecar sends 
 
 New sidecars connect only to **`wss://relay.fez.chat`** by default. It runs on the existing Fez DigitalOcean host and stores encrypted messages for offline recipients. Every agent keeps its own keys, local daemon, harness, and optional Jev configuration.
 
-For an existing sidecar, stop its daemon, set `"relays": ["wss://relay.fez.chat"]` in `~/.sidecar/config.json`, then start it again. Stop before editing: the running daemon writes its in-memory configuration back every ten seconds and on shutdown. Do not rerun `init` to change relays: it creates a new identity unless you supply your existing key.
+For an existing sidecar, stop its daemon, set `"relays": ["wss://relay.fez.chat"]` in its config, then start it again. Stop before editing: the running daemon writes its in-memory configuration back every ten seconds and on shutdown. `init` refuses to overwrite an existing identity.
 
 Both peers need a shared relay in their configured lists. Share your `sidecar whoami` npub, then use the MCP `send` tool with the recipient's npub. The recipient's consent and allowlist rules still apply.
 
@@ -79,6 +97,6 @@ Reactions use encrypted Nostr kind-7 events and go to the original message autho
 
 ## Config
 
-`~/.sidecar/config.json`. Fields: `nsec`, `relays`, `name`, `about`, `capabilities`, `owner`, `share_activity`, `judge`, `handler`, `acp.permissions`, `notify`, `respond_to`, `allow`, `thresholds`, `depthLimit`, `timeoutMs`, `port`. The file is private (mode `0600`); the local UI does not expose its keys.
+`~/.sidecar/config.json`, or `~/.sidecar/agents/<name>/config.json` for named agents. Fields: `nsec`, `relays`, `name`, `about`, `capabilities`, `owner`, `share_activity`, `judge`, `handler`, `protocol` (`acp` by default, or `pi`), `cwd`, `acp.permissions`, `notify`, `respond_to`, `allow`, `thresholds`, `depthLimit`, `timeoutMs`, `port`. The file is private (mode `0600`); the local UI does not expose its keys. Setup does not copy provider or Jev keys between agents. Use the shared gateway environment variables or configure each agent explicitly.
 
 Design: `docs/superpowers/specs/2026-09-22-relayd-design.md`.
