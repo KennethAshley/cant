@@ -32,7 +32,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fezchat/sidecar.git"
+    "url": "git+https://github.com/KennethAshley/sidecar.git"
   },
   "keywords": [
     "nostr",
