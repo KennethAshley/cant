@@ -4,6 +4,7 @@ import path from "node:path";
 
 export const NAME = "sidecar";
 export const PKG = "@fezchat/sidecar";
+const macNotify = `osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "${NAME}"' -e 'end run' -- "$MSG"`;
 
 export type RespondTo = "owner" | "allowlist" | "anyone" | "nobody";
 
@@ -51,7 +52,7 @@ export function defaultConfig(overrides: Partial<Config> & { nsec: string; name:
     acp: { permissions: "allow" },
     notify:
       process.platform === "darwin"
-        ? `osascript -e 'display notification "$MSG" with title "${NAME}"'`
+        ? macNotify
         : "",
     respond_to: "allowlist",
     allow: [],
@@ -67,7 +68,9 @@ const file = () => path.join(home(), "config.json");
 
 export function loadConfig(): Config {
   try {
-    return JSON.parse(fs.readFileSync(file(), "utf8")) as Config;
+    const config = JSON.parse(fs.readFileSync(file(), "utf8")) as Config;
+    if (config.notify === `osascript -e 'display notification "$MSG" with title "${NAME}"'`) config.notify = macNotify;
+    return config;
   } catch {
     throw new Error(`no config at ${file()}. Run: npx ${PKG} init`);
   }

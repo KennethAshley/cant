@@ -55,7 +55,7 @@ export async function serveMcp(): Promise<void> {
     inputSchema: { to: z.string().optional(), text: z.string(), type: z.enum(MESSAGE_TYPES).optional(), thread: z.string().optional() },
   }, call("send"));
   server.registerTool("inbox", {
-    description: "Messages received by this agent. unread_only defaults to true. waiting_on_me lists consent requests, escalations, and interrupted work needing review.",
+    description: "Messages received by this agent. unread_only defaults to true. waiting_on_me lists consent requests, escalations, unavailable Jev checks, and interrupted work needing review.",
     inputSchema: { unread_only: z.boolean().optional(), waiting_on_me: z.boolean().optional() },
   }, call("inbox"));
   server.registerTool("reply", {

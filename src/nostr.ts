@@ -8,6 +8,8 @@ import { z } from "zod";
 export const KIND_PROFILE = 0;
 export const KIND_DM = 14;
 export const KIND_GIFT_WRAP = 1059;
+export const KIND_WORKING = 20002;
+export const WORKING_TTL_MS = 8000;
 /** Wrap timestamps are fuzzed up to 2 days back; subscriptions must reach at least this far. */
 export const DM_FUZZ_WINDOW_S = 2 * 86_400;
 
@@ -22,7 +24,8 @@ export const verificationSchema = z.discriminatedUnion("status", [
 export type Verification = z.infer<typeof verificationSchema>;
 export const attentionSchema = z.enum(["now", "later", "none"]);
 export type Attention = z.infer<typeof attentionSchema>;
-export type Outgoing = Pick<Message, "text" | "type"> & Partial<Pick<Message, "thread" | "depth" | "reactionTo" | "verification" | "attention">>;
+export const titleSchema = z.string().regex(/^[^\u0000-\u001f\u007f-\u009f\u2028\u2029]+$/).trim().min(1).max(80);
+export type Outgoing = Pick<Message, "text" | "type"> & Partial<Pick<Message, "thread" | "depth" | "reactionTo" | "verification" | "attention" | "title">>;
 
 export function validTimestamp(seconds: number): boolean {
   return Number.isSafeInteger(seconds) && seconds >= 0 && seconds <= 8_640_000_000_000;
@@ -41,6 +44,7 @@ export interface Message {
   reactionTo?: string;
   verification?: Verification;
   attention?: Attention;
+  title?: string;
 }
 
 export interface Profile {
@@ -90,19 +94,21 @@ export function wrap(
   } else if (msg.thread) tags.push(["e", msg.thread]);
   if (msg.verification) tags.push(["verification", JSON.stringify(verificationSchema.parse(msg.verification))]);
   if (msg.attention) tags.push(["attention", attentionSchema.parse(msg.attention)]);
+  const title = msg.title === undefined ? undefined : titleSchema.parse(msg.title);
+  if (title) tags.push(["title", title]);
   if (msg.depth) tags.push(["depth", String(msg.depth)]);
   const rumor = nip59.createRumor({ kind: msg.type === "reaction" ? 7 : KIND_DM, tags, content: msg.text }, secret);
   const self = getPublicKey(secret);
   const wraps = [to, self].map((pk) => nip59.createWrap(nip59.createSeal(rumor, secret, pk), pk) as Event);
   const message: Message = { id: rumor.id, thread: msg.thread ?? rumor.id, from: self, to, type: msg.type, text: msg.text, depth: msg.depth ?? 0, ts: rumor.created_at,
-    ...(msg.reactionTo ? { reactionTo: msg.reactionTo } : {}), ...(msg.verification ? { verification: msg.verification } : {}), ...(msg.attention ? { attention: msg.attention } : {}) };
+    ...(msg.reactionTo ? { reactionTo: msg.reactionTo } : {}), ...(msg.verification ? { verification: msg.verification } : {}), ...(msg.attention ? { attention: msg.attention } : {}), ...(title ? {title} : {}) };
   return { wraps, id: rumor.id, message };
 }
 
 /** Decrypt and authenticate a gift wrap addressed to me. Undefined for anything not ours. */
-function unwrapRumor(event: Event, secret: Uint8Array): Event | undefined {
+function unwrapRumor(event: Event, secret: Uint8Array, kind = KIND_GIFT_WRAP): Event | undefined {
   try {
-    if (event.kind !== KIND_GIFT_WRAP || !verifyEvent(event)) return undefined;
+    if (event.kind !== kind || !verifyEvent(event)) return undefined;
     const seal: Event = JSON.parse(nip44.decrypt(event.content, nip44.getConversationKey(secret, event.pubkey)));
     if (seal.kind !== 13 || !verifyEvent(seal)) return undefined;
     const rumor = JSON.parse(nip44.decrypt(seal.content, nip44.getConversationKey(secret, seal.pubkey)));
@@ -111,6 +117,32 @@ function unwrapRumor(event: Event, secret: Uint8Array): Event | undefined {
   } catch {
     return undefined;
   }
+}
+
+const workingSchema = z.object({
+  thread: z.string().min(1).max(128), message: z.string().regex(/^[0-9a-f]{64}$/),
+  active: z.boolean(), at: z.number().int().nonnegative().safe(),
+});
+export type Working = z.infer<typeof workingSchema> & { from: string };
+
+/** Sidecar's private kind-20002 envelope: NIP-44 + signed seal, never a stored DM. */
+export function wrapWorking(secret: Uint8Array, to: string, status: Omit<Working, "from">): Event {
+  const rumor = nip59.createRumor({kind: KIND_WORKING, tags: [["p", to]], content: JSON.stringify(workingSchema.parse(status))}, secret);
+  const seal = nip59.createSeal(rumor, secret, to);
+  const outer = generateSecretKey();
+  return finalizeEvent({kind: KIND_WORKING, created_at: Math.floor(Date.now() / 1000), tags: [["p", to]],
+    content: nip44.encrypt(JSON.stringify(seal), nip44.getConversationKey(outer, to))}, outer);
+}
+
+export function unwrapWorking(event: Event, secret: Uint8Array, now = Date.now()): Working | undefined {
+  try {
+    if (event.kind !== KIND_WORKING || event.content.length > 4096 || !event.tags.some(t => t[0] === "p" && t[1] === getPublicKey(secret))) return;
+    const rumor = unwrapRumor(event, secret, KIND_WORKING);
+    if (!rumor || rumor.kind !== KIND_WORKING || !rumor.tags.some(t => t[0] === "p" && t[1] === getPublicKey(secret))) return;
+    const status = workingSchema.parse(JSON.parse(rumor.content));
+    if (status.at > now + 2000 || now - status.at >= WORKING_TTL_MS) return;
+    return {...status, from: rumor.pubkey};
+  } catch { return undefined; }
 }
 
 export function unwrap(event: Event, secret: Uint8Array): Message | undefined {
@@ -126,6 +158,7 @@ export function unwrap(event: Event, secret: Uint8Array): Message | undefined {
   if (type === "reaction" && (rumor.kind !== 7 || !reactionTo || !/^[0-9a-f]{64}$/.test(reactionTo) || !rumor.content.trim() || rumor.content.length > 32)) return undefined;
   let verification: Verification | undefined;
   const attention = attentionSchema.safeParse(tag("attention"));
+  const title = titleSchema.safeParse(tag("title"));
   if (tag("verification")) {
     try { verification = verificationSchema.parse(JSON.parse(tag("verification")!)); } catch { /* Ignore invalid optional evidence. */ }
   }
@@ -141,6 +174,7 @@ export function unwrap(event: Event, secret: Uint8Array): Message | undefined {
     ...(reactionTo ? { reactionTo } : {}),
     ...(verification ? { verification } : {}),
     ...(attention.success ? { attention: attention.data } : {}),
+    ...(title.success ? {title: title.data} : {}),
   };
 }
 
@@ -200,34 +234,49 @@ export class Relay {
     }
   }
 
-  /** Live subscription for gift wraps addressed to `pubkey`. Dedupes across relays. */
+  /** Best effort on existing connections: no durable outbox, ACK wait, or replay. */
+  publishEphemeral(events: Event[]): void {
+    for (const [url, connected] of this.pool.listConnectionStatus()) {
+      if (!connected) continue;
+      void this.pool.ensureRelay(url, {abort: AbortSignal.timeout(500)}).then(async relay => {
+        for (const event of events) if (relay.connected) await relay.send(JSON.stringify(["EVENT", event]));
+      }).catch(() => {});
+    }
+  }
+
+  /** Inbox + private ephemeral status. Only durable events need an ID history. */
   subscribeInbox(pubkey: string, sinceS: number, onEvent: (ev: Event) => void): () => void {
     const seen = new Set<string>();
     const stops = [...new Set(this.urls)].map(url => {
       let stopped = false, delay = 1000;
       let timer: ReturnType<typeof setTimeout> | undefined;
-      let sub: ReturnType<SimplePool["subscribeMany"]> | undefined;
-      const connect = () => {
+      let sub: { close(): void } | undefined;
+      const retry = () => {
+        if (stopped) return;
+        timer = setTimeout(connect, delay);
+        timer.unref();
+        delay = Math.min(delay * 2, 30_000);
+      };
+      const connect = async () => {
         if (stopped) return;
         // Reissue the original filter: gift-wrap timestamps are randomized, not arrival cursors.
-        sub = this.pool.subscribeMany([url],
-          { kinds: [KIND_GIFT_WRAP], "#p": [pubkey], since: Math.max(0, sinceS - DM_FUZZ_WINDOW_S) }, {
-            onevent: ev => {
-              delay = 1000;
-              if (stopped || seen.has(ev.id)) return;
-              onEvent(ev);
-              seen.add(ev.id);
-            },
-            // The pool also calls oneose on connection failure, so it cannot reset backoff.
-            onclose: () => {
-              if (stopped) return;
-              timer = setTimeout(connect, delay);
-              timer.unref();
-              delay = Math.min(delay * 2, 30_000);
-            },
-          });
+        try {
+          const relay = await this.pool.ensureRelay(url);
+          if (stopped) return;
+          // Direct subscription avoids SimplePool retaining every heartbeat ID forever.
+          sub = relay.subscribe(
+            [{ kinds: [KIND_GIFT_WRAP, KIND_WORKING], "#p": [pubkey], since: Math.max(0, sinceS - DM_FUZZ_WINDOW_S) }], {
+              onevent: ev => {
+                delay = 1000;
+                if (stopped || seen.has(ev.id)) return;
+                onEvent(ev);
+                if (ev.kind !== KIND_WORKING) seen.add(ev.id);
+              },
+              onclose: retry,
+            });
+        } catch { retry(); }
       };
-      connect();
+      void connect();
       return () => { stopped = true; clearTimeout(timer); sub?.close(); };
     });
     const stop = () => { stops.forEach(stop => stop()); this.subscriptions.delete(stop); };

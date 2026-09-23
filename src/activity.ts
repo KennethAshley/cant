@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { MESSAGE_TYPES, verificationSchema, attentionSchema, validTimestamp, type Attention } from "./nostr.ts";
+import { MESSAGE_TYPES, verificationSchema, attentionSchema, titleSchema, validTimestamp, npubOf, type Attention } from "./nostr.ts";
 import type { Stored } from "./inbox.ts";
 
 const key = z.string().regex(/^[0-9a-f]{64}$/);
@@ -11,8 +11,9 @@ const activitySchema = z.object({
     type: z.enum([...MESSAGE_TYPES, "reaction"]), text: z.string().max(131072),
     depth: z.number().int().nonnegative(), ts: z.number().refine(validTimestamp),
     reactionTo: key.optional(), verification: verificationSchema.optional(), attention: attentionSchema.catch("now").optional(),
+    title: titleSchema.optional().catch(undefined),
     triage: z.object({
-      action: z.enum(["act", "ask", "ignore", "escalate"]), confidence: probability,
+      action: z.enum(["act", "ask", "ignore", "escalate", "unavailable"]), confidence: probability,
       urgency: z.number().int().min(0).max(3), inScope: probability, contradiction: probability.optional(), reason: z.string().max(2000),
     }).optional(),
     steering: z.object({
@@ -25,7 +26,7 @@ export type TimelineMessage = Stored & { observedBy?: string };
 
 /** Owner presentation only. Missing labels stay visible; blockers cannot be silenced. */
 export function attentionOf(m: Pick<Stored, "type" | "attention" | "triage" | "parked" | "verification" | "work">): Attention {
-  if (m.type === "cant" || m.type === "escalate" || m.parked || m.work === "interrupted" || m.triage?.action === "escalate" || ["failed", "unavailable"].includes(m.verification?.status ?? "")) return "now";
+  if (m.type === "cant" || m.type === "escalate" || m.parked || m.work === "interrupted" || ["escalate", "unavailable"].includes(m.triage?.action ?? "") || ["failed", "unavailable"].includes(m.verification?.status ?? "")) return "now";
   if (["ack", "reaction", "activity", "cancel"].includes(m.type)) return "none";
   return m.attention ?? "now";
 }
@@ -69,5 +70,16 @@ export function projectTimeline(records: Stored[]): TimelineMessage[] {
       messages.set(message.id, { ...message, triage, steering, attention, read: true, receivedAt: existing?.receivedAt ?? record.receivedAt, observedBy: record.from });
     } catch { /* Unknown versions and malformed copies are not conversation messages. */ }
   }
-  return [...messages.values()].sort((a, b) => a.ts - b.ts || a.receivedAt - b.receivedAt);
+  // Older clients sent the same diagnostic as an owner DM. Fold only exact
+  // receiver-authored copies into the affected message; keep the stored events.
+  const legacyErrors = new Set<string>();
+  for (const message of messages.values()) {
+    const t = message.triage;
+    if (t?.action !== "escalate" || !t.reason.startsWith("jev failed: ")) continue;
+    message.triage = {...t, action: "unavailable"};
+    legacyErrors.add(`${message.to}\n${message.thread}\nescalated: ${t.reason}\nfrom ${npubOf(message.from)}\nthread ${message.thread}\n\n${message.text}`);
+  }
+  return [...messages.values()]
+    .filter(m => m.type !== "escalate" || !legacyErrors.has(`${m.from}\n${m.thread}\n${m.text}`))
+    .sort((a, b) => a.ts - b.ts || a.receivedAt - b.receivedAt);
 }

@@ -3,13 +3,15 @@ import http from "node:http";
 import type { Event } from "nostr-tools/pure";
 import type { Config } from "./config.ts";
 import { Inbox, type Stored } from "./inbox.ts";
-import { pubkeyFromNpub, pubkeyOf, npubOf, secretFromNsec, wrap, unwrap, type Message, type MessageType, type Profile, type Outgoing, type Verification, type Attention } from "./nostr.ts";
+import { pubkeyFromNpub, pubkeyOf, npubOf, secretFromNsec, wrap, unwrap, titleSchema, type Message, type MessageType, type Profile, type Outgoing, type Verification, type Attention } from "./nostr.ts";
 import { triage, steer, scope, verify, attention, route, typesafeAsk, type Ask, type Steering } from "./decide.ts";
 import { projectTimeline, attentionOf } from "./activity.ts";
 import { uiHtml, uiCss, uiJs } from "./ui.ts";
+import { KIND_WORKING, WORKING_TTL_MS, wrapWorking, unwrapWorking, type Working } from "./nostr.ts";
 
 export interface RelayLike {
   publish(events: Event[]): Promise<void>;
+  publishEphemeral(events: Event[]): void;
   subscribeInbox(pubkey: string, sinceS: number, onEvent: (ev: Event) => void): () => void;
   findAgents(): Promise<Profile[]>;
   close(): void;
@@ -47,6 +49,9 @@ export class Daemon {
   private retryTimer?: ReturnType<typeof setInterval>;
   private deliveries = new Map<string, Promise<void>>();
   private retries = new Map<string, { attempts: number; at: number }>();
+  private working = new Map<string, Working>();
+  private workingTurns = new Map<string, Stored>();
+  private workingTimer?: ReturnType<typeof setInterval>;
 
   constructor(deps: Deps) {
     this.deps = deps;
@@ -57,7 +62,9 @@ export class Daemon {
     this.notifyFn = deps.notify ?? ((text) => {
       const cmd = deps.config.notify;
       if (!cmd) return;
-      execFile("/bin/sh", ["-c", cmd], { env: { ...process.env, MSG: text.slice(0, 200) } }, () => {});
+      execFile("/bin/sh", ["-c", cmd], { env: { ...process.env, MSG: text.replaceAll("\0", "").slice(0, 200) }, timeout: 5000 }, error => {
+        if (error) console.error("notification could not be delivered");
+      });
     });
   }
 
@@ -91,10 +98,19 @@ export class Daemon {
     flush();
     this.retryTimer = setInterval(flush, 5000);
     this.retryTimer.unref();
+    this.workingTimer = setInterval(() => {
+      for (const message of this.workingTurns.values()) this.setWorking(message, true);
+    }, 3000);
+    this.workingTimer.unref();
     // ponytail: replay retained DM history and dedupe by inbox ID; paginate if history becomes too large.
     // New outgoing messages must not advance the cursor past unread messages sent during an outage.
     this.stopSub = this.deps.relay.subscribeInbox(this.pubkey, 0, (ev) => {
       if (this.stopped) return;
+      if (ev.kind === KIND_WORKING) {
+        const status = unwrapWorking(ev, this.secret);
+        if (status && projectTimeline(this.deps.inbox.all()).some(m => m.id === status.message && m.thread === status.thread && m.to === status.from)) this.rememberWorking(status);
+        return;
+      }
       const m = unwrap(ev, this.secret);
       if (!m || this.deps.inbox.has(m.id)) return;
       if (m.to === this.pubkey) void this.onInbound(m).catch((e) => console.error("inbound failed", e));
@@ -103,8 +119,12 @@ export class Daemon {
   }
 
   stop(): void {
+    for (const message of this.workingTurns.values()) this.setWorking(message, false);
+    this.workingTurns.clear();
+    this.working.clear();
     this.stopped = true;
     clearInterval(this.retryTimer);
+    clearInterval(this.workingTimer);
     for (const thread of this.running.keys()) this.cancelled.add(thread);
     this.queued.clear();
     this.stopSub?.();
@@ -113,6 +133,25 @@ export class Daemon {
   }
 
   // sending
+
+  private rememberWorking(status: Working): void {
+    for (const [id, entry] of this.working) if (Date.now() - entry.at >= WORKING_TTL_MS) this.working.delete(id);
+    const id = status.from + ":" + status.message;
+    if (status.at <= (this.working.get(id)?.at ?? -1)) return;
+    this.working.delete(id);
+    this.working.set(id, status); // Keep stop timestamps until expiry to reject delayed starts.
+    if (this.working.size > 256) this.working.delete(this.working.keys().next().value!);
+  }
+
+  private setWorking(message: Stored, active: boolean): void {
+    const previous = this.working.get(this.pubkey + ":" + message.id);
+    const status: Working = {from: this.pubkey, thread: message.thread, message: message.id, active, at: Math.max(Date.now(), (previous?.at ?? 0) + 1)};
+    this.rememberWorking(status);
+    const recipients = new Set([message.from]);
+    if (this.deps.config.share_activity && this.owner) recipients.add(this.owner);
+    recipients.delete(this.pubkey);
+    this.deps.relay.publishEphemeral([...recipients].map(to => wrapWorking(this.secret, to, status)));
+  }
 
   private deliver(id: string, events: Event[]): Promise<void> {
     const active = this.deliveries.get(id);
@@ -135,6 +174,11 @@ export class Daemon {
   }
 
   private async emit(to: string, msg: Outgoing, complete?: { id: string; state: "finished" | "interrupted" }): Promise<string> {
+    if (msg.thread && ["ask", "answer", "done", "cant", "escalate"].includes(msg.type)) {
+      const titled = this.deps.inbox.thread(msg.thread).find(m => m.title && ["ask", "answer", "done", "cant", "escalate"].includes(m.type) &&
+        ((m.from === to && m.to === this.pubkey) || (m.from === this.pubkey && m.to === to)));
+      if (titled) msg = {...msg, title: titled.title};
+    }
     if (!msg.attention && ["answer", "done"].includes(msg.type)) {
       const thread = msg.thread ? this.deps.inbox.thread(msg.thread).filter(m =>
         (m.from === to && m.to === this.pubkey) || (m.from === this.pubkey && m.to === to)) : [];
@@ -160,12 +204,12 @@ export class Daemon {
   }
 
   /** Outcome to the sender, cc the owner unless the owner is the sender. */
-  private async outcome(m: Stored, type: "done" | "cant", text: string, verification?: Verification, attention: Attention = "now", state: "finished" | "interrupted" = "finished"): Promise<void> {
+  private async outcome(m: Stored, type: "done" | "cant", text: string, verification?: Verification, attention: Attention = "now", state: "finished" | "interrupted" = "finished", title?: string): Promise<void> {
     attention = attentionOf({type, verification, attention});
     await Promise.all([
-      this.emit(m.from, { text, type, thread: m.thread, depth: m.depth + 1, verification, attention }, {id: m.id, state}),
+      this.emit(m.from, { text, type, thread: m.thread, depth: m.depth + 1, verification, attention, title }, {id: m.id, state}),
       this.owner && m.from !== this.owner && !this.deps.config.share_activity
-        ? this.emit(this.owner, { text: `[${type} for ${m.from.slice(0, 8)}] ${text}`, type, thread: m.thread, depth: m.depth + 1, verification, attention }) : undefined,
+        ? this.emit(this.owner, { text: `[${type} for ${m.from.slice(0, 8)}] ${text}`, type, thread: m.thread, depth: m.depth + 1, verification, attention, title }) : undefined,
     ]);
   }
 
@@ -186,9 +230,23 @@ export class Daemon {
   }
 
   private async onInbound(m: Message): Promise<void> {
+    const previous = this.deps.inbox.all();
     const s = this.deps.inbox.append(m, m.type === "activity" ? { read: true } :
       ["ask", "answer", "done", "cant", "escalate", "cancel"].includes(m.type) ? {work: "pending"} : {});
-    if (m.type === "activity") return;
+    if (m.type === "activity") {
+      const before = new Map(projectTimeline(previous).map(message => [message.id, message]));
+      for (const message of projectTimeline([...previous, s])) {
+        const old = before.get(message.id);
+        if (message.triage?.action !== "unavailable" && attentionOf(message) === "now" && (!old || attentionOf(old) !== "now")) this.notifyFn(`${message.type}: ${message.text.slice(0, 160)}`);
+      }
+      return;
+    }
+    if (m.from !== this.pubkey && ["ask", "answer", "done", "cant", "escalate"].includes(m.type)) {
+      const known = previous.some(message => message.type !== "activity" && (message.from === m.from || message.to === m.from));
+      const sender = this.profiles.get(m.from)?.name || npubOf(m.from);
+      if (!known) this.notifyFn(`New connection · ${sender}: ${m.text.slice(0, 100)}`);
+      else if (!this.deps.handler && attentionOf(s) === "now") this.notifyFn(`${s.type} from ${sender}: ${s.text.slice(0, 100)}`);
+    }
     // Observation delivery must not delay admission/cancellation of the actual message.
     void this.shareActivity(s).catch(() => console.error("owner activity copy could not be delivered"));
     await this.admit(s);
@@ -233,7 +291,6 @@ export class Daemon {
     if (this.stopped || s.work === "finished" || s.work === "interrupted") return;
     if (!this.deps.handler) {
       // owner's own sidecar: nothing runs, the inbox is the surface
-      if (attentionOf(s) === "now") this.notifyFn(`${s.type} from ${s.from.slice(0, 8)}: ${s.text.slice(0, 80)}`);
       this.deps.inbox.setWork(s.id, "finished");
       return;
     }
@@ -279,13 +336,13 @@ export class Daemon {
       const t = await triage(
         { message: s, thread, sender: this.profiles.get(s.from), me: this.me, owner: s.from === this.owner, thresholds: this.deps.config.thresholds },
         this.ask,
-      ).catch((e) => ({ action: "escalate" as const, confidence: 0, urgency: 1, inScope: 0, reason: `jev failed: ${e instanceof Error ? e.message : e}` }));
+      ).catch((e) => ({ action: "unavailable" as const, confidence: 0, urgency: 1, inScope: 0, reason: String(e instanceof Error ? e.message : e).slice(0, 2000) }));
       if (this.stopped || this.cancelled.has(s.thread)) return;
       this.deps.inbox.setTriage(s.id, t);
       await this.shareActivity(s);
       if (this.stopped || this.cancelled.has(s.thread)) return;
       if (t.action === "escalate") await this.escalate(s, `escalated: ${t.reason}`);
-      else if (t.action !== "ignore") await this.run(s, t.action, thread);
+      else if (t.action === "act" || t.action === "ask") await this.run(s, t.action, thread);
       if (!this.stopped) this.deps.inbox.setWork(s.id, "finished");
     } finally {
       if (!this.stopped && this.cancelled.has(s.thread)) this.deps.inbox.setWork(s.id, "finished");
@@ -304,31 +361,43 @@ export class Daemon {
     if (this.stopped || this.cancelled.has(s.thread)) return;
     const body = [...thread.filter(m => m.id !== s.id).slice(-19), s]
       .map((m) => `[${m.type} from ${m.from === this.pubkey ? "me" : "them"}${m.id === s.id ? ", respond to this message" : ""}]\n${m.text}`).join("\n\n");
-    const instruction = mode === "act"
+    let instruction = mode === "act"
       ? "Respond to the marked message using this conversation as context. Continue unfinished work when a reply supplies a missing detail. Do not repeat finished work. Reply with the result only."
       : "Do not do the task yet. Reply with exactly one clarifying question.";
+    let title = thread.find(m => m.title)?.title;
+    if (!title) instruction += '\nBefore your reply, add one metadata line: <sidecar-title>A short title</sidecar-title>. Choose a 2–5 word conversation title (maximum 80 characters) based on the topic. Then a blank line and your normal reply. No other wrapper.';
+    else instruction += '\nReply in plain text without title metadata.';
     let out: { text: string; stopReason: string };
     this.deps.inbox.setWork(s.id, "running");
+    this.workingTurns.set(s.id, s);
+    this.setWorking(s, true);
     try {
       out = await h.prompt(s.thread, `${body}\n\n${instruction}`);
     } catch (e) {
       if (this.stopped || this.cancelled.has(s.thread)) return;
       return this.outcome(s, "cant", `handler failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      if (this.workingTurns.delete(s.id)) this.setWorking(s, false);
     }
     if (this.stopped || this.cancelled.has(s.thread)) return;
     this.deps.inbox.saveSessions(h.sessionIds());
     if (out.stopReason !== "end_turn") return this.outcome(s, "cant", `stopped: ${out.stopReason}\n${out.text.slice(-2000)}`);
+    const metadata = out.text.match(/^\s*<sidecar-title>([^\r\n]*)<\/sidecar-title>\s*\r?\n([\s\S]+)$/);
+    if (metadata && metadata[2].trim()) {
+      title ??= titleSchema.safeParse(metadata[1]).data;
+      out.text = metadata[2].trim();
+    }
     // A clarifying question blocks progress and always needs attention.
-    if (mode === "ask") { await this.emit(s.from, { text: out.text, type: "answer", thread: s.thread, depth: s.depth + 1, attention: "now" }, {id: s.id, state: "finished"}); return; }
+    if (mode === "ask") { await this.emit(s.from, { text: out.text, type: "answer", thread: s.thread, depth: s.depth + 1, attention: "now", title }, {id: s.id, state: "finished"}); return; }
     let v;
     try { v = await verify({ ask: s.text, output: out.text, thread }, this.ask); }
     catch {
       if (this.stopped || this.cancelled.has(s.thread)) return;
-      return this.outcome(s, "cant", `Jev verification unavailable; result needs review:\n${out.text}`, { status: "unavailable" });
+      return this.outcome(s, "cant", `Jev verification unavailable; result needs review:\n${out.text}`, { status: "unavailable" }, "now", "finished", title);
     }
     if (this.stopped || this.cancelled.has(s.thread)) return;
     const verification: Verification = v.p === undefined ? { status: "skipped" } : { status: v.answersAsk ? "passed" : "failed", probability: v.p };
-    await this.outcome(s, v.answersAsk ? "done" : "cant", v.answersAsk ? out.text : `output did not answer the ask (${v.p?.toFixed(2)}):\n${out.text.slice(-2000)}`, verification, v.attention);
+    await this.outcome(s, v.answersAsk ? "done" : "cant", v.answersAsk ? out.text : `output did not answer the ask (${v.p?.toFixed(2)}):\n${out.text.slice(-2000)}`, verification, v.attention, "finished", title);
   }
 
   // tools
@@ -349,7 +418,7 @@ export class Daemon {
     const box = this.deps.inbox;
     let items = args.unread_only === false ? box.all() : box.unread();
     items = items.filter(s => s.to === this.pubkey && s.type !== "activity");
-    if (args.waiting_on_me) items = items.filter((s) => s.parked || s.type === "escalate" || s.work === "interrupted");
+    if (args.waiting_on_me) items = items.filter((s) => s.parked || s.type === "escalate" || s.work === "interrupted" || s.triage?.action === "unavailable");
     box.markRead(items.map((s) => s.id));
     return items;
   }
@@ -399,10 +468,12 @@ export class Daemon {
   }
 
   timeline() {
+    for (const [id, status] of this.working) if (Date.now() - status.at >= WORKING_TTL_MS) this.working.delete(id);
     return {
       me: { ...this.me, npub: npubOf(this.pubkey) }, profiles: [...this.profiles.values()].filter(p => p.pubkey !== this.pubkey),
       messages: projectTimeline(this.deps.inbox.all()).map(m => ({...m, attention: attentionOf(m)})), relays: this.deps.config.relays,
       sharing: { enabled: !!this.deps.config.share_activity, owner: this.deps.config.owner },
+      working: [...this.working.values()].filter(status => status.active),
     };
   }
 

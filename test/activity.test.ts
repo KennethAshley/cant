@@ -2,6 +2,34 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { projectTimeline, attentionOf } from "../src/activity.ts";
 import type { Stored } from "../src/inbox.ts";
+import { npubOf } from "../src/nostr.ts";
+
+test("encrypted owner copies preserve the author's title through receiver updates", () => {
+  const message = {id: "d".repeat(64), thread: "d".repeat(64), from: "a".repeat(64), to: "b".repeat(64), type: "done", text: "Visit Mount Royal.", depth: 0, ts: 1};
+  const copy = (from: string, title: string): Stored => ({...message, id: from, from, to: "c".repeat(64), type: "activity", read: true, receivedAt: 1,
+    text: JSON.stringify({version: 1, updatedAt: 1, message: {...message, title}})});
+  const author = copy(message.from, "Montréal chat"), receiver = copy(message.to, "Changed title");
+  for (const records of [[author, receiver], [receiver, author]]) assert.equal(projectTimeline(records)[0].title, "Montréal chat");
+  assert.equal(projectTimeline([copy(message.from, "x".repeat(81))])[0]?.text, message.text, "bad optional metadata cannot hide the reply");
+});
+
+test("old automatic judge-error escalations fold into the matching message's diagnostics", () => {
+  const original: Stored = {id: "a".repeat(64), thread: "a".repeat(64), from: "b".repeat(64), to: "c".repeat(64),
+    text: "Thanks for the chat!", type: "answer", depth: 0, ts: 1, receivedAt: 1, read: true,
+    triage: {action: "escalate", confidence: 0, urgency: 1, inScope: 0, reason: "jev failed: Judge HTTP 504"}};
+  const escalation: Stored = {...original, id: "d".repeat(64), from: original.to, to: "e".repeat(64), type: "escalate", triage: undefined,
+    text: `escalated: jev failed: Judge HTTP 504\nfrom ${npubOf(original.from)}\nthread ${original.thread}\n\n${original.text}`};
+  const human = {...escalation, id: "f".repeat(64), text: "Please investigate: jev failed: Judge HTTP 504"};
+  for (const records of [[original, escalation, human], [escalation, human, original]]) {
+    const messages = projectTimeline(records);
+    assert.deepEqual(messages.map(m => m.id).sort(), [original.id, human.id].sort());
+    assert.equal(messages.find(m => m.id === original.id)?.text, original.text);
+    assert.equal(messages.find(m => m.id === original.id)?.triage?.action, "unavailable");
+  }
+  assert.equal(original.triage?.action, "escalate", "projection must not rewrite persisted records");
+  assert.equal(projectTimeline([escalation]).length, 1, "keep an error when the affected message is missing");
+  assert.equal(projectTimeline([original, {...escalation, from: "f".repeat(64)}]).length, 2, "only the actual receiver's automatic copy is folded");
+});
 
 test("owner attention preserves blockers and defaults old messages to visible", () => {
   assert.equal(attentionOf({type: "done"}), "now");

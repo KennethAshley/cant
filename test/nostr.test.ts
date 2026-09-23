@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { unwrapEvent, createRumor, createSeal, createWrap } from "nostr-tools/nip59";
+import * as nostr from "../src/nostr.ts";
+import * as nip44 from "nostr-tools/nip44";
+import { finalizeEvent } from "nostr-tools/pure";
 import {
   generateNsec, secretFromNsec, pubkeyOf, npubOf, pubkeyFromNpub,
   wrap, unwrap, profileEvent, parseProfile,
@@ -38,6 +41,20 @@ test("first message of a thread uses its own id as thread", () => {
   const got = unwrap(wraps[0], b);
   assert.equal(got?.thread, id);
   assert.equal(got?.depth, 0);
+});
+
+test("conversation titles stay encrypted; invalid optional titles do not discard messages", () => {
+  const a = secretFromNsec(generateNsec()), b = secretFromNsec(generateNsec());
+  const {wraps, message} = wrap(a, pubkeyOf(b), {text: "Visit Mount Royal.", type: "done", title: "Montréal chat"});
+  assert.equal(message.title, "Montréal chat");
+  assert.equal(unwrap(wraps[0], b)?.title, message.title);
+  assert.ok(wraps.every(event => event.tags.every(tag => tag[0] === "p")));
+  for (const title of ["", " ", "x".repeat(81), "two\nlines", "hidden\u0000text"]) {
+    const rumor = createRumor({kind: 14, content: "still readable", tags: [["p", pubkeyOf(b)], ["type", "done"], ["title", title]]}, a);
+    const received = unwrap(createWrap(createSeal(rumor, a, pubkeyOf(b)), pubkeyOf(b)), b);
+    assert.equal(received?.text, "still readable");
+    assert.equal(received?.title, undefined);
+  }
 });
 
 test("encrypted attention labels round-trip; invalid labels leave the message visible", () => {
@@ -106,6 +123,36 @@ test("invalid depths cannot bypass the conversation chain limit", () => {
     const rumor = createRumor({kind: 14, content: "reply", tags: [["p", pubkeyOf(b)], ["type", "answer"], ["depth", depth]]}, a);
     assert.equal(unwrap(createWrap(createSeal(rumor, a, pubkeyOf(b)), pubkeyOf(b)), b), undefined, depth);
   }
+});
+
+test("working indicators are authenticated, private, short-lived, and never parsed as messages", () => {
+  assert.equal(typeof nostr.wrapWorking, "function");
+  const a = secretFromNsec(generateNsec()), b = secretFromNsec(generateNsec()), stranger = secretFromNsec(generateNsec());
+  const now = Date.now();
+  const status = {thread: "private-thread", message: "a".repeat(64), active: true, at: now};
+  const event = nostr.wrapWorking(a, pubkeyOf(b), status);
+  assert.equal(event.kind, 20002);
+  assert.deepEqual(event.tags, [["p", pubkeyOf(b)]]);
+  assert.notEqual(event.pubkey, pubkeyOf(a), "random outer author hides the agent identity");
+  assert.ok(!JSON.stringify(event).includes(status.thread));
+  assert.deepEqual(nostr.unwrapWorking(event, b, now), {...status, from: pubkeyOf(a)});
+  assert.equal(unwrap(event, b), undefined);
+  assert.equal(nostr.unwrapWorking(event, stranger, now), undefined);
+  assert.equal(nostr.unwrapWorking(JSON.parse(JSON.stringify({...event, sig: "0".repeat(128)})), b, now), undefined);
+  assert.equal(nostr.unwrapWorking(event, b, now + 8000), undefined);
+  assert.equal(nostr.unwrapWorking(event, b, now - 3000), undefined);
+  // Valid signatures cannot make malformed or misaddressed payloads trustworthy.
+  const malformed = (content: unknown, to = pubkeyOf(b), sealAuthor = a) => {
+    const rumor = createRumor({kind: 20002, content: JSON.stringify(content), tags: [["p", to]]}, a);
+    const seal = createSeal(rumor, sealAuthor, pubkeyOf(b));
+    return finalizeEvent({kind: 20002, created_at: Math.floor(now / 1000), tags: [["p", pubkeyOf(b)]],
+      content: nip44.encrypt(JSON.stringify(seal), nip44.getConversationKey(stranger, pubkeyOf(b)))}, stranger);
+  };
+  for (const content of [{...status, active: "yes"}, {...status, thread: "x".repeat(129)}, {...status, message: "nope"}, {...status, at: 1.5}]) {
+    assert.equal(nostr.unwrapWorking(malformed(content), b, now), undefined);
+  }
+  assert.equal(nostr.unwrapWorking(malformed(status, pubkeyOf(stranger)), b, now), undefined);
+  assert.equal(nostr.unwrapWorking(malformed(status, pubkeyOf(b), stranger), b, now), undefined);
 });
 
 // relay
@@ -181,6 +228,29 @@ test("relay publishes, delivers to a live inbox subscription, and finds agents",
 
   stop();
   relay.close();
+});
+
+test("working events use live relay subscriptions and are dropped while disconnected", async () => {
+  __setWebSocketForTests(FakeSocket as unknown as typeof WebSocket);
+  const relay = new Relay(["wss://working.example"]);
+  const a = secretFromNsec(generateNsec()), b = secretFromNsec(generateNsec());
+  const got: Event[] = [];
+  const event = finalizeEvent({kind: 20002, created_at: Math.floor(Date.now() / 1000), tags: [["p", pubkeyOf(b)]], content: "test"}, a);
+  try {
+    assert.equal(typeof relay.publishEphemeral, "function");
+    relay.publishEphemeral([event]);
+    assert.ok(!FakeSocket.sockets.some(s => s.url === "wss://working.example/"), "typing alone must not connect");
+    relay.subscribeInbox(pubkeyOf(b), 0, ev => got.push(ev));
+    await new Promise(r => setTimeout(r, 20));
+    relay.publishEphemeral([event]);
+    await new Promise(r => setTimeout(r, 30));
+    assert.deepEqual(got.map(e => e.id), [event.id]);
+    relay.close();
+    const count = FakeSocket.store.length;
+    relay.publishEphemeral([event]);
+    await new Promise(r => setTimeout(r, 20));
+    assert.equal(FakeSocket.store.length, count);
+  } finally { relay.close(); }
 });
 
 test("a failed relay reconnects independently and replays fuzzed wraps without duplicate delivery", async () => {

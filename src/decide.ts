@@ -66,7 +66,7 @@ const IN_SCOPE: Question = {
 // triage
 
 export interface Triage {
-  action: "act" | "ask" | "ignore" | "escalate";
+  action: "act" | "ask" | "ignore" | "escalate" | "unavailable";
   confidence: number;
   /** 0 low, 1 normal, 2 high, 3 critical. */
   urgency: number;

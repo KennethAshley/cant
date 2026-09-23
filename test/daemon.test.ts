@@ -12,6 +12,7 @@ import { Inbox } from "../src/inbox.ts";
 import { defaultConfig, type Config } from "../src/config.ts";
 import { generateNsec, secretFromNsec, pubkeyOf, npubOf, wrap, unwrap, type Message, type Profile } from "../src/nostr.ts";
 import type { Ask, Answer } from "../src/decide.ts";
+import * as nostr from "../src/nostr.ts";
 
 class FakeRelay implements RelayLike {
   subs: { pubkey: string; cb: (ev: Event) => void }[] = [];
@@ -21,6 +22,7 @@ class FakeRelay implements RelayLike {
     this.published.push(...events);
     for (const ev of events) for (const s of this.subs) if (ev.tags.some((t) => t[0] === "p" && t[1] === s.pubkey)) setTimeout(() => s.cb(ev), 0);
   }
+  publishEphemeral(events: Event[]) { void this.publish(events).catch(() => {}); }
   subscribeInbox(pubkey: string, _since: number, cb: (ev: Event) => void) { this.subs.push({ pubkey, cb }); return () => {}; }
   async findAgents() { return this.profiles; }
   close() {}
@@ -67,6 +69,228 @@ function setup(over: Partial<Config> = {}, ask: Ask = actAsk) {
 }
 
 const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+
+test("one agent turn titles the encrypted conversation, survives restart, and keeps metadata out of Jev", async () => {
+  const outputs: unknown[] = [];
+  const {d, relay, handler, me, friend, owner, dir, config} = setup({share_activity: true}, async (state, questions) => {
+    if ("answers_ask" in questions) outputs.push((state as {output: string}).output);
+    return actAsk(state, questions);
+  });
+  handler.reply = "<sidecar-title>Montréal chat</sidecar-title>\n\nVisit Mount Royal.";
+  await d.start();
+  const request = wrap(friend, pubkeyOf(me), {text: "A couple of Montréal locations?", type: "ask"});
+  try {
+    await relay.publish(request.wraps); await tick(120);
+    const result = relay.received(friend).find(m => m.type === "done")!;
+    assert.equal(result?.title, "Montréal chat");
+    assert.equal(result?.text, "Visit Mount Royal.");
+    assert.deepEqual(outputs, ["Visit Mount Royal."]);
+    assert.equal(handler.prompts.length, 1, "title uses the existing turn");
+    assert.match(handler.prompts[0].text, /<sidecar-title>/);
+    const ownerCopy = relay.received(owner).filter(m => m.type === "activity").map(m => JSON.parse(m.text).message).find(m => m.id === result.id);
+    assert.equal(ownerCopy.title, result.title);
+  } finally { d.stop(); }
+  const nextRelay = new FakeRelay(), nextHandler = new FakeHandler();
+  nextHandler.reply = "<sidecar-title>Changed title</sidecar-title>\nOld Montréal too.";
+  const restarted = new Daemon({config, relay: nextRelay, handler: nextHandler, inbox: new Inbox(dir), ask: actAsk, notify: () => {}});
+  try {
+    await restarted.start();
+    await nextRelay.publish(wrap(friend, pubkeyOf(me), {text: "Anywhere else?", type: "answer", thread: request.id}).wraps); await tick(120);
+    const result = nextRelay.received(friend).find(m => m.type === "done")!;
+    assert.equal(result?.title, "Montréal chat");
+    assert.equal(result?.text, "Old Montréal too.");
+    assert.ok(!nextHandler.prompts[0].text.includes("<sidecar-title>"), "do not request another title");
+  } finally { restarted.stop(); }
+});
+
+test("clarifications can supply titles and optional formatting never loses a plain reply", async () => {
+  for (const [reply, text, title] of [
+    ["<sidecar-title>Montréal chat</sidecar-title>\nWhich neighborhood?", "Which neighborhood?", "Montréal chat"],
+    ["Which neighborhood?", "Which neighborhood?", undefined],
+    ["<sidecar-title>" + "x".repeat(81) + "</sidecar-title>\nWhich neighborhood?", "Which neighborhood?", undefined],
+  ]) {
+    const {d, relay, handler, friend, me} = setup({}, async () => ({action: choice("ask", .99), urgency: score(1), in_scope: noul(1), contradiction: noul(0)}));
+    handler.reply = reply!;
+    try {
+      await d.start();
+      await relay.publish(wrap(friend, pubkeyOf(me), {text: "Where should we go?", type: "ask"}).wraps); await tick(100);
+      const result = relay.received(friend).find(m => m.type === "answer");
+      assert.equal(result?.text, text);
+      assert.equal(result?.title, title);
+    } finally { d.stop(); }
+  }
+});
+
+test("working heartbeats reach the peer and opted-in owner without history or extra judgments", async () => {
+  let judgments = 0;
+  const {d, relay, handler, me, friend, owner, box} = setup({share_activity: true}, async (s, q) => { judgments++; return actAsk(s, q); });
+  const turn = deferred();
+  handler.prompt = async () => { await turn.promise; return {text: "ready", stopReason: "end_turn"}; };
+  const peerBox = new Inbox(fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-working-peer-")));
+  const ownerBox = new Inbox(fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-working-owner-")));
+  const peer = new Daemon({config: defaultConfig({nsec: nip19.nsecEncode(friend), name: "peer"}), relay, inbox: peerBox, notify: () => {}});
+  const observer = new Daemon({config: defaultConfig({nsec: nip19.nsecEncode(owner), name: "owner"}), relay, inbox: ownerBox, notify: () => {}});
+  try {
+    await d.start(); await peer.start(); await observer.start();
+    assert.deepEqual(d.timeline().working, []);
+    const sent = await peer.send({to: pubkeyOf(me), text: "take your time"});
+    assert.ok("id" in sent);
+    await tick(150);
+    for (const daemon of [d, peer, observer]) {
+      assert.deepEqual(daemon.timeline().working.map(w => [w.from, w.thread, w.message]), [[pubkeyOf(me), sent.thread, sent.id]]);
+    }
+    const history = [box, peerBox, ownerBox].map(b => b.all().length);
+    const first = peer.timeline().working[0].at;
+    await tick(3100);
+    assert.ok(peer.timeline().working[0].at > first, "active turn refreshes the indicator");
+    assert.deepEqual([box, peerBox, ownerBox].map(b => b.all().length), history);
+    assert.equal(judgments, 1, "heartbeats bypass Jev");
+    turn.resolve(); await tick(150);
+    for (const daemon of [d, peer, observer]) assert.deepEqual(daemon.timeline().working, []);
+    assert.ok(peer.timeline().messages.some(m => m.type === "done" && m.text === "ready"));
+    assert.ok([box, peerBox, ownerBox].every(b => b.all().every(m => !m.text.includes('"active"'))));
+  } finally { turn.resolve(); d.stop(); peer.stop(); observer.stop(); }
+});
+
+test("working indicators reject unrelated agents and replays, expire, and disappear on restart", async t => {
+  const {d, relay, me, friend, owner, config, box, dir} = setup();
+  await d.start();
+  try {
+    assert.deepEqual(d.timeline().working, []);
+    const sent = await d.send({to: pubkeyOf(friend), text: "request"});
+    assert.ok("id" in sent);
+    const now = Date.now();
+    const status = {thread: sent.thread, message: sent.id, active: true, at: now};
+    const publish = async (secret: Uint8Array, value = status) => {
+      await relay.publish([nostr.wrapWorking(secret, pubkeyOf(me), value)]); await tick();
+    };
+    await publish(owner);
+    assert.deepEqual(d.timeline().working, [], "only the actual recipient can report working on this request");
+    await publish(friend, {...status, thread: "unrelated"});
+    assert.deepEqual(d.timeline().working, []);
+    const count = box.all().length;
+    await publish(friend);
+    assert.equal(d.timeline().working.length, 1);
+    await publish(friend, {...status, active: false, at: now + 1});
+    await publish(friend);
+    assert.deepEqual(d.timeline().working, [], "delayed start cannot undo a newer stop");
+    await publish(friend, {...status, at: now + 2});
+    assert.equal(d.timeline().working.length, 1);
+    assert.equal(box.all().length, count);
+    const restarted = new Daemon({config, relay: new FakeRelay(), inbox: new Inbox(dir)});
+    assert.deepEqual(restarted.timeline().working, []);
+    t.mock.method(Date, "now", () => now + 9000);
+    assert.deepEqual(d.timeline().working, [], "lost stop packets expire without new traffic");
+  } finally { d.stop(); }
+});
+
+test("working clears on failure, cancellation, and shutdown without sharing to an opted-out owner", async () => {
+  for (const ending of ["error", "cancel", "shutdown"]) {
+    const {d, relay, handler, me, friend, owner} = setup();
+    const turn = deferred(), started = deferred();
+    handler.prompt = async () => {
+      started.resolve(); await turn.promise;
+      if (ending === "error") throw new Error("handler crashed");
+      return {text: "", stopReason: "cancelled"};
+    };
+    handler.cancel = async () => { turn.resolve(); return true; };
+    try {
+      await d.start();
+      const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "work"});
+      await relay.publish(request.wraps); await started.promise;
+      assert.equal(d.timeline().working.length, 1, ending);
+      if (ending === "shutdown") d.stop();
+      else if (ending === "cancel") await d.cancel(request.id);
+      else turn.resolve();
+      await tick(100);
+      assert.deepEqual(d.timeline().working, [], ending);
+      const events = relay.published.filter(e => e.kind === 20002);
+      assert.ok(events.every(e => e.tags[0][1] === pubkeyOf(friend)), "owner sharing remains opt-in");
+      assert.equal(nostr.unwrapWorking(events.at(-1)!, friend)?.active, false);
+      assert.ok(events.every(e => nostr.unwrapWorking(e, owner) === undefined));
+    } finally { turn.resolve(); d.stop(); }
+  }
+});
+
+test("owner notifications follow attention transitions without repeats from shared observations or relay replay", async () => {
+  const {relay, me, owner, friend} = setup();
+  const notes: string[] = [];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-notifications-"));
+  const config = defaultConfig({nsec: nip19.nsecEncode(owner), name: "owner", handler: "", notify: "", respond_to: "anyone"});
+  const observer = new Daemon({config, relay, inbox: new Inbox(dir), notify: text => notes.push(text)});
+  const message = wrap(friend, pubkeyOf(me), {type: "ask", text: "Could you review this?", attention: "none"}).message;
+  let updatedAt = Date.now();
+  const share = async (source: Uint8Array, detail: object = {}) => {
+    const copy = wrap(source, pubkeyOf(owner), {type: "activity", thread: message.thread,
+      text: JSON.stringify({version: 1, updatedAt: ++updatedAt, message: {...message, ...detail}})});
+    await relay.publish(copy.wraps); await tick();
+    return copy;
+  };
+  try {
+    await observer.start();
+    await share(friend);
+    assert.equal(notes.length, 0, "quiet observations do not notify");
+    const triage = {action: "escalate", confidence: .9, urgency: 2, inScope: .9, reason: "needs owner decision"};
+    await share(me, {triage});
+    assert.equal(notes.length, 1);
+    assert.match(notes[0], /Could you review this/);
+    const duplicate = await share(me, {triage});
+    await share(friend);
+    assert.equal(notes.length, 1, "neither repeat decisions nor the other reporter duplicate an alert");
+    observer.stop();
+    const restarted = new Daemon({config, relay, inbox: new Inbox(dir), notify: text => notes.push(text)});
+    await restarted.start();
+    try {
+      await relay.publish(duplicate.wraps); await tick();
+      await share(me, {triage});
+      assert.equal(notes.length, 1, "restart and history replay do not repeat existing alerts");
+    } finally { restarted.stop(); }
+  } finally { observer.stop(); }
+});
+
+test("a fresh contact notifies once per npub, while later quiet messages and discovery stay silent", async () => {
+  const {relay, me, friend, owner, config, dir, box} = setup({handler: "", respond_to: "anyone"});
+  const notes: string[] = [];
+  const d = new Daemon({config, relay, inbox: box, notify: text => notes.push(text)});
+  const first = wrap(friend, pubkeyOf(me), {type: "answer", text: "Hello from a new agent", attention: "later"});
+  try {
+    await d.start();
+    relay.profiles = [{pubkey: pubkeyOf(friend), name: "Pi", about: "", capabilities: []}];
+    await d.findAgents(); assert.equal(notes.length, 0);
+    await relay.publish(first.wraps); await tick();
+    assert.equal(notes.length, 1);
+    assert.match(notes[0], /New connection.*Pi/);
+    await relay.publish(first.wraps);
+    await relay.publish(wrap(friend, pubkeyOf(me), {type: "done", text: "Another quiet update", attention: "later"}).wraps);
+    await tick(); assert.equal(notes.length, 1);
+    await relay.publish(wrap(friend, pubkeyOf(me), {type: "answer", text: "Need your input", attention: "now"}).wraps);
+    await tick(); assert.equal(notes.length, 2);
+    assert.match(notes[1], /Need your input/);
+    await relay.publish(wrap(owner, pubkeyOf(me), {type: "ask", text: "New and needs attention", attention: "now"}).wraps);
+    await tick(); assert.equal(notes.length, 3, "first contact and attention share a single alert");
+    d.stop();
+    const restarted = new Daemon({config, relay, inbox: new Inbox(dir), notify: text => notes.push(text)});
+    await restarted.start();
+    try {
+      await relay.publish(first.wraps);
+      await relay.publish(wrap(friend, pubkeyOf(me), {type: "answer", text: "Still connected", attention: "none"}).wraps);
+      await tick(); assert.equal(notes.length, 3);
+    } finally { restarted.stop(); }
+  } finally { d.stop(); }
+});
+
+test("notification hooks receive message data safely without blocking message admission", async () => {
+  const {relay, friend, me, config, box, dir} = setup({handler: "", respond_to: "anyone"});
+  const output = path.join(dir, "notification.txt");
+  const d = new Daemon({config: {...config, notify: `/usr/bin/printenv MSG > '${output}'`}, relay, inbox: box});
+  try {
+    await d.start();
+    const incoming = wrap(friend, pubkeyOf(me), {type: "answer", text: 'Montréal "hello"\0 $MSG $(whoami)', attention: "now"});
+    await relay.publish(incoming.wraps); await tick(100);
+    assert.equal(box.get(incoming.id)?.work, "finished");
+    assert.match(fs.readFileSync(output, "utf8"), /Montréal "hello" \$MSG \$\(whoami\)/);
+  } finally { d.stop(); }
+});
 
 test("offline sends survive restart and retry the original signed events after partial acceptance", async () => {
   const {d, config, relay, friend, dir} = setup({owner: undefined});
@@ -283,7 +507,7 @@ test("attention labels reach the peer and owner without suppressing agent work",
       assert.equal(relay.received(friend).find(m => m.type === "ack")?.attention, "none");
       assert.equal(relay.received(friend).find(m => m.type === "done")?.attention, level);
       assert.equal(relay.received(owner).find(m => m.type === "done")?.attention, level);
-      assert.equal(notes.length, level === "now" ? 1 : 0);
+      assert.equal(notes.filter(n => !n.startsWith("New connection")).length, level === "now" ? 1 : 0);
     } finally { d.stop(); }
   }
 });
@@ -305,10 +529,11 @@ test("manual replies get attention labels; passive owner notifications respect t
     await d.reply({thread: request.thread, text: "Optional update", type: "done"});
     assert.equal(relay.received(friend).at(-1)?.attention, "later");
     await tick();
-    assert.equal(notes.length, 0);
+    assert.equal(notes.length, 1);
+    assert.match(notes[0], /^New connection/);
     await relay.publish(wrap(secretFromNsec(config.nsec), pubkeyOf(owner), {text: "blocked", type: "cant", attention: "none"}).wraps);
     await tick();
-    assert.equal(notes.length, 1, "blockers stay visible even with a quiet tag");
+    assert.equal(notes.length, 2, "blockers stay visible even with a quiet tag");
     assert.equal(ownerDaemon.inbox().length, 2, "filtering never consumes or hides the harness inbox");
   } finally { d.stop(); ownerDaemon.stop(); }
 });
@@ -379,7 +604,7 @@ test("stranger is parked, owner gets escalate, allow resumes it", async () => {
   await tick();
   assert.equal(handler.prompts.length, 0);
   assert.deepEqual(relay.received(owner).map((m) => m.type), ["escalate"]);
-  assert.equal(notes.length, 1);
+  assert.equal(notes.filter(n => !n.startsWith("New connection")).length, 1);
   const r = await d.allow(npubOf(pubkeyOf(stranger)));
   await tick();
   assert.equal(r.resumed, 1);
@@ -926,6 +1151,35 @@ test("verification errors never become a verified success", async () => {
     assert.equal(result.type, "cant");
     assert.deepEqual(result.verification, { status: "unavailable" });
   } finally { d.stop(); }
+});
+
+test("judge transport errors stay on the original message without sending an escalation or running work", async () => {
+  for (const share_activity of [false, true]) {
+    const {d, relay, handler, me, owner, friend, notes, box, dir} = setup({share_activity}, async () => { throw new Error("Judge HTTP 504"); });
+    await d.start();
+    try {
+      const request = wrap(friend, pubkeyOf(me), {type: "answer", text: "Thanks for the chat!", attention: "none"});
+      await relay.publish(request.wraps); await tick(100);
+      assert.equal(handler.prompts.length, 0, "unjudged messages cannot start work");
+      assert.deepEqual(relay.received(friend), []);
+      assert.equal(relay.received(owner).filter(m => m.type !== "activity").length, 0, "no technical error is sent as conversation text");
+      assert.deepEqual(notes.filter(n => !n.startsWith("New connection")), [], "no push notification for a transport error");
+      assert.equal(box.get(request.id)?.triage?.action, "unavailable");
+      assert.match(new Inbox(dir).get(request.id)?.triage?.reason ?? "", /Judge HTTP 504/);
+      assert.equal(d.timeline().messages.find(m => m.id === request.id)?.attention, "now");
+      assert.ok(d.inbox({waiting_on_me: true}).some(m => m.id === request.id), "unjudged messages remain available for review");
+      if (share_activity) {
+        const ownerBox = new Inbox(fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-judge-owner-")));
+        for (const m of relay.received(owner)) ownerBox.append(m);
+        const ownerDaemon = new Daemon({config: defaultConfig({nsec: nip19.nsecEncode(owner), name: "owner"}), relay, inbox: ownerBox});
+        const messages = ownerDaemon.timeline().messages;
+        assert.equal(messages.length, 1);
+        assert.equal(messages[0].text, "Thanks for the chat!");
+        assert.equal(messages[0].triage?.action, "unavailable");
+        assert.match(messages[0].triage?.reason ?? "", /Judge HTTP 504/);
+      }
+    } finally { d.stop(); }
+  }
 });
 
 test("no-key completion is visibly unchecked", async () => {

@@ -1,5 +1,16 @@
 // Served by the daemon: no frontend build, external assets, or browser-held private keys.
 import { themes, themeCss, appearanceJs } from "./themes.ts";
+import type { Message } from "./nostr.ts";
+
+export function threadTitle(messages: Pick<Message, "thread" | "type" | "text" | "title">[]): string {
+  const conversation = messages.filter(m => ["ask", "answer", "done", "cant", "escalate"].includes(m.type));
+  const title = conversation.find(m => m.title)?.title;
+  if (title) return title;
+  const first = conversation.find(m => m.type === "ask") ?? conversation[0];
+  const text = first?.text.replace(/\s+/g, " ").trim() ?? "";
+  const opening = text.split(" ").slice(0, 7).join(" ").slice(0, 64).trimEnd();
+  return opening ? opening + (opening.length < text.length ? "…" : "") : messages[0]?.thread.slice(0, 8) ?? "Conversation";
+}
 
 export const uiHtml = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -27,10 +38,12 @@ export const uiHtml = `<!doctype html>
   <header class="conversation-header"><div><h2 id="conversation-title"># conversations</h2><p id="conversation-context">Your local chat log</p></div><button id="copy-thread" class="secondary" hidden>Copy thread ID</button></header>
   <div id="error" role="alert" hidden></div>
   <div id="timeline" class="timeline"><div class="empty"><div class="empty-mark" aria-hidden="true">#</div><h3>No conversation selected.</h3><p>Your agents’ messages and Jev decisions appear here.</p><p class="empty-hint">Send a message with your agent’s Sidecar tools to start a thread.</p></div></div>
+  <div id="working" class="working" role="status" aria-live="polite" aria-atomic="true" hidden></div>
   <footer class="conversation-footer"><span id="view-note">Your messages stay on your Sidecar.</span><span id="updated">Waiting for messages</span></footer>
 </main></div><div id="toast" role="status" hidden></div></body></html>`;
 
 export const uiCss = `
+.working{padding:10px 24px;color:var(--secondary);font-size:11px;border-top:1px solid var(--line)}
 :root{color-scheme:dark;font-family:ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;font-size:13px;color:var(--ink);background:var(--base);font-synthesis:none;--base:#1d2021;--panel:#282828;--raised:#32302f;--line:#504945;--ink:#ebdbb2;--soft:#bdae93;--muted:#a89984;--accent:#d79921;--secondary:#83a598;--tertiary:#d3869b;--code:#d5c4a1;--error:#fabd2f}
 *{box-sizing:border-box}body{margin:0}button,input,select{font:inherit;color:inherit}button{cursor:pointer}button:disabled{cursor:wait;opacity:.6}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}h1,h2,h3,p{margin:0}[hidden]{display:none!important}::selection{background:var(--line);color:var(--ink)}*{scrollbar-width:thin;scrollbar-color:var(--line) transparent}
 .workspace{display:grid;grid-template-columns:270px minmax(0,1fr);height:100dvh;max-width:1900px;margin:auto;border-inline:1px solid var(--line)}
@@ -59,7 +72,7 @@ ${themeCss}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
 `;
 
-export const uiJs = appearanceJs + String.raw`
+export const uiJs = appearanceJs + '\n' + threadTitle.toString() + String.raw`
 'use strict';
 document.addEventListener('DOMContentLoaded', () => {
 const $ = id => document.getElementById(id);
@@ -83,7 +96,7 @@ function threads() {
 function visibleThreads(groups) {
   const filter = $('attention-filter').value, query = $('search').value.toLowerCase();
   return groups.filter(([, messages]) => (filter === 'all' || messages.some(m => m.attention === filter)) &&
-    (!query || (threadNames(messages) + ' ' + messages.map(m => m.text).join(' ')).toLowerCase().includes(query)));
+    (!query || (threadTitle(messages) + ' ' + threadNames(messages) + ' ' + messages.map(m => m.text).join(' ')).toLowerCase().includes(query)));
 }
 function threadNames(messages) { const people = [...new Set(messages.filter(m => m.type !== 'reaction').flatMap(m => [m.from, m.to]))]; return people.map(name).join(' ↔ '); }
 function status(messages) {
@@ -91,6 +104,7 @@ function status(messages) {
   if (!last) return '';
   if (messages.some(m => m.delivery === 'pending')) return 'Saved locally · waiting for relay';
   if (last.work === 'interrupted') return 'Interrupted · needs review';
+  if (last.triage?.action === 'unavailable') return 'Jev check unavailable';
   if (last.type === 'done') return last.verification?.status === 'passed' ? '✓ Completed · Jev verified' : '✓ Completed · not verified';
   if (last.type === 'cant') return 'Needs attention';
   if (last.triage?.action === 'ignore') return 'No reply needed';
@@ -103,7 +117,7 @@ function renderThreads(groups) {
   $('thread-count').textContent = groups.length;
   const container = $('threads'); container.replaceChildren();
   for (const [id, messages] of groups) {
-    const title = '# ' + id.slice(0,8);
+    const title = '# ' + threadTitle(messages);
     const first = messages.find(m => m.type === 'ask') || messages.find(m => m.type !== 'reaction') || messages[0];
     const button = el('button', 'thread'); button.title = threadNames(messages); button.type = 'button'; button.setAttribute('aria-current', String(id === selected));
     const top = el('div', 'thread-top'); top.append(el('span','thread-title',title), el('span','thread-time',time(messages.at(-1).ts)));
@@ -169,7 +183,7 @@ function renderConversation(messages) {
     $('conversation-title').textContent = '# conversations'; $('conversation-context').textContent = 'Your local chat log';
     const empty = el('div','empty'); empty.append(el('div','empty-mark','#'),el('h3','','No conversation selected.'),el('p','','Choose a conversation, or change the attention filter to see more.'),el('p','empty-hint','Send a message with your agent’s Sidecar tools. For an owner view, enable share_activity on your agents.')); container.append(empty); return;
   }
-  $('conversation-title').textContent = '# ' + messages[0].thread.slice(0,8); $('conversation-context').textContent = threadNames(messages) + ' / ' + status(messages);
+  $('conversation-title').textContent = '# ' + threadTitle(messages); $('conversation-context').textContent = threadNames(messages) + ' / ' + status(messages);
   const observed = messages.some(m => m.observedBy); $('view-note').textContent = observed ? 'Full conversation / encrypted owner copies' : 'Full conversation / encrypted messages';
   let date = '';
   for (const message of messages.filter(m => m.type !== 'reaction')) {
@@ -189,8 +203,12 @@ function renderConversation(messages) {
     }
     if (message.triage) {
       const t = message.triage; const labels = {act:'Ready to act',ask:'Clarification needed',ignore:'No reply needed',escalate:'Owner decision needed'};
-      const label = t.contradiction >= 0.8 ? 'Possible contradiction' : labels[t.action];
-      content.append(decision(message.id + '-triage','jev: ' + label + ' ' + percent(t.confidence),'Decision confidence: ' + percent(t.confidence) + '\nIn scope: ' + percent(t.inScope) + (t.contradiction === undefined ? '' : '\nContradiction probability: ' + percent(t.contradiction)) + '\n' + t.reason,t.action === 'escalate' ? 'warn' : ''));
+      if (t.action === 'unavailable') {
+        content.append(decision(message.id + '-triage','Jev check unavailable','No decision was returned; this message did not start agent work. Send a new request to retry.\n\n' + t.reason,'warn'));
+      } else {
+        const label = t.contradiction >= 0.8 ? 'Possible contradiction' : labels[t.action];
+        content.append(decision(message.id + '-triage','jev: ' + label + ' ' + percent(t.confidence),'Decision confidence: ' + percent(t.confidence) + '\nIn scope: ' + percent(t.inScope) + (t.contradiction === undefined ? '' : '\nContradiction probability: ' + percent(t.contradiction)) + '\n' + t.reason,t.action === 'escalate' ? 'warn' : ''));
+      }
     }
     if (message.verification) {
       const v = message.verification; const label = {passed:'jev: Verified ' + percent(v.probability || 0),failed:'jev: Incomplete',unavailable:'jev: Verification unavailable',skipped:'jev: Not checked'}[v.status];
@@ -208,12 +226,20 @@ function render() {
   $('self-name').textContent = state.me.name; $('self-avatar').textContent = state.me.name.slice(0,2).toUpperCase(); $('self-name').title = state.me.npub;
   $('relay-name').textContent = state.relays.map(url => url.replace('wss://','').replace('ws://','')).join(', ');
   renderThreads(groups); renderAgents(); renderConversation(groups.find(([id]) => id === selected)?.[1]);
+  renderWorking();
+}
+function renderWorking() {
+  const people = [...new Set((state?.working || []).filter(w => w.thread === selected && Date.now() - w.at < 8000).map(w => name(w.from)))];
+  const label = people.length ? people.join(', ') + (people.length === 1 ? ' is working…' : ' are working…') : '';
+  if ($('working').textContent !== label) $('working').textContent = label;
+  $('working').hidden = !label;
 }
 async function refresh(force = false) {
   if (busy) return; busy = true;
   try {
-    const next = await rpc('timeline'); const nextSignature = JSON.stringify(next); state = next;
+    const next = await rpc('timeline'); const {working, ...history} = next; const nextSignature = JSON.stringify(history); state = next;
     if (force || nextSignature !== signature) { signature = nextSignature; render(); }
+    else renderWorking();
     $('error').hidden = true; $('connection').textContent = 'local session connected'; $('updated').textContent = 'synced ' + new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
   } catch (error) { $('connection').textContent = 'Sidecar disconnected'; $('error').textContent = 'Cannot reach Sidecar. Start the daemon again; this page will reconnect automatically.'; $('error').hidden = false; }
   finally { busy = false; }
@@ -229,7 +255,7 @@ $('copy-thread').addEventListener('click',async () => { try { await navigator.cl
 window.addEventListener('hashchange',() => { selected = location.hash.slice(1); $('attention-filter').value = 'all'; $('search').value = ''; if (state) render(); });
 refresh().then(discover);
 // ponytail: polling is enough for a local two-agent inbox; use incremental updates if history becomes large.
-setInterval(() => { if (!document.hidden) refresh(); },2000);
+setInterval(() => { renderWorking(); if (!document.hidden) refresh(); },2000);
 document.addEventListener('visibilitychange',() => { if (!document.hidden) refresh(); });
 });
 `;

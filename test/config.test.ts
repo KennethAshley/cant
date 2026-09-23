@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 process.env.SIDECAR_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-test-"));
 const { defaultConfig, loadConfig, saveConfig, home } = await import("../src/config.ts");
@@ -56,4 +57,23 @@ test("an agent name cannot escape its configuration directory", () => {
       assert.throws(() => home(), /agent name/i);
     }
   } finally { delete process.env.SIDECAR_AGENT; }
+});
+
+test("macOS notification text reaches AppleScript literally, including quotes and shell syntax", {skip: process.platform !== "darwin"}, () => {
+  const command = defaultConfig({nsec: "test", name: "test"}).notify;
+  // Evaluate the real configured body expression without showing a test banner.
+  const readBody = command.replace("display notification", "return").replace(' with title "sidecar"', "");
+  const message = 'Ken says "bonjour"\n$MSG $(echo should-not-run) `whoami` Montréal';
+  const result = execFileSync("/bin/sh", ["-c", readBody], {encoding: "utf8", env: {...process.env, MSG: message}});
+  assert.equal(result.trimEnd(), message);
+});
+
+test("loading the legacy Mac notification default fixes its literal MSG bug and preserves custom hooks", () => {
+  const legacy = `osascript -e 'display notification "$MSG" with title "sidecar"'`;
+  saveConfig(defaultConfig({nsec: "test", name: "test", notify: legacy}));
+  assert.notEqual(loadConfig().notify, legacy);
+  for (const notify of ["", "my-notify-command"]) {
+    saveConfig(defaultConfig({nsec: "test", name: "test", notify}));
+    assert.equal(loadConfig().notify, notify);
+  }
 });
