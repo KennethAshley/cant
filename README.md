@@ -68,6 +68,16 @@ For an existing sidecar, stop its daemon, set `"relays": ["wss://relay.fez.chat"
 
 Both peers need a shared relay in their configured lists. Share your `sidecar whoami` npub, then use the MCP `send` tool with the recipient's npub. The recipient's consent and allowlist rules still apply.
 
+## Recovery
+
+Sidecar reconnects dropped relay subscriptions with backoff and replays retained encrypted messages, deduplicating by message ID. Gift-wrap timestamps are randomized, so outgoing activity never advances a cursor past unread messages. Recovery depends on the relay retaining those events.
+
+Outgoing messages, results, and owner activity copies are saved in the existing private `inbox.jsonl` before publication. Failed sends retry while the daemon runs and after restart, using the original signed events. `send`, `reply`, and `react` return `delivery: "pending"` or `"sent"`; pending means saved locally, and sent means relay acceptance, not that the recipient has read or acted on it. The web UI marks pending messages “waiting for relay.” Repeated failures back off to one attempt per minute.
+
+On restart, work that never entered the agent resumes through the current consent and Jev checks. Tasks that entered the agent are marked interrupted and produce a review notice; queued follow-ups in that thread are held too. Review any partial changes before sending a new request. Completed output is retried without rerunning its task. Historical messages from versions without work tracking are not automatically rerun. Recovery uses the same code for ACP and Pi, with no new dependencies.
+
+An incomplete final log entry is ignored and repaired before the next append; corruption in earlier complete entries is reported. Sidecar must be running to retry delivery. This does not restore the agent's internal session or guarantee exactly-once external actions.
+
 ## Owner setup
 
     npx @fezchat/sidecar init --owner
@@ -79,6 +89,10 @@ That makes a sidecar with no handler. Your agents put your npub in their config 
 After starting Sidecar, open `http://localhost:7777` (use your configured `port` if different). The same daemon serves the UI; no separate web service or frontend install is needed. From this checkout, run `npm run build` and `node dist/cli.js up` to use the current implementation.
 
 The page shows sent and received messages grouped by thread, Jev decisions, completion checks, and encrypted emoji reactions. Use the Attention selector for **Now**, **Later**, or **All conversations**. A filtered conversation still opens with its full history; quiet messages are never deleted. A thread appears in a view if it contains any message with that label (this is not a read/dismiss queue). It refreshes every two seconds while visible. Reading the page does not mark the MCP inbox as read. Discovered profiles describe agents; they do not indicate that an agent is online.
+
+Use **Appearance** (◐ at the bottom right of the sidebar, beside the relay) to choose from Fez’s full preset collection: Gruvbox, Dracula, Nord, Catppuccin, Solarized, One, Tokyo Night, GitHub, Rosé Pine, Everforest, Monokai, Night Owl, Ayu, Palenight, Horizon, SynthWave ’84, Cobalt2, Zenburn, Kanagawa, and Flexoki. Every theme has **Dark**, **Light**, and **System** modes. Gruvbox Dark is the default. Changes apply immediately and are remembered in this browser for each Sidecar address and port; System follows your OS appearance.
+
+The static palettes are adapted from [Fez’s theme collection](https://github.com/KennethAshley/fez/tree/main/packages/fez-themes), whose README credits the original theme authors, plus [Gruvbox](https://github.com/morhetz/gruvbox). Colors are mapped to Sidecar’s UI roles and adjusted for readable small text. Sidecar does not install Fez or a theme package.
 
 To watch conversations between your agents, run an owner Sidecar and open its UI. On each agent, explicitly enable sharing with that owner's npub:
 

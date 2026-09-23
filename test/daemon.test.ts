@@ -68,6 +68,207 @@ function setup(over: Partial<Config> = {}, ask: Ask = actAsk) {
 
 const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
 
+test("offline sends survive restart and retry the original signed events after partial acceptance", async () => {
+  const {d, config, relay, friend, dir} = setup({owner: undefined});
+  const attempts: Event[][] = [];
+  relay.publish = async events => { attempts.push(events); throw new Error("connection lost after recipient accepted"); };
+  const sent = await d.send({to: pubkeyOf(friend), text: "durable request"});
+  assert.ok("id" in sent);
+  d.stop();
+  const reopened = new Inbox(dir);
+  assert.equal(reopened.all().find(m => m.id === sent.id)?.delivery, "pending");
+  const healthy = new FakeRelay();
+  const restarted = new Daemon({config, relay: healthy, inbox: reopened, ask: actAsk});
+  try {
+    await restarted.start(); await tick();
+    assert.equal(JSON.stringify(healthy.published), JSON.stringify(attempts[0]), "retry wire bytes unchanged, including the self copy");
+    assert.equal(new Inbox(dir).all().find(m => m.id === sent.id)?.delivery, "sent");
+    assert.ok(!JSON.stringify(restarted.timeline()).includes("wraps"), "transport payloads stay out of the UI");
+  } finally { restarted.stop(); }
+});
+
+test("the outbox retries during an outage without requiring a restart", async () => {
+  const {d, relay, friend, box} = setup({owner: undefined});
+  const publish = relay.publish.bind(relay);
+  let offline = true;
+  relay.publish = async events => { if (offline) throw new Error("offline"); await publish(events); };
+  try {
+    await d.start();
+    const sent = await d.send({to: pubkeyOf(friend), text: "retry me"});
+    assert.ok("id" in sent);
+    offline = false;
+    await tick(5500);
+    assert.equal(box.all().find(m => m.id === sent.id)?.delivery, "sent");
+    assert.equal(new Set(relay.received(friend).map(m => m.id)).size, 1);
+  } finally { d.stop(); }
+});
+
+test("a completed result survives publication failure and is delivered after restart without rerunning work", async () => {
+  const {d, config, relay, handler, me, friend, dir} = setup({owner: undefined});
+  handler.prompt = async (thread, text) => {
+    handler.prompts.push({thread, text});
+    relay.publish = async () => { throw new Error("relay went offline"); };
+    return {text: "saved completed output", stopReason: "end_turn"};
+  };
+  await d.start();
+  await relay.publish(wrap(friend, pubkeyOf(me), {type: "ask", text: "finish once"}).wraps);
+  await tick(120); d.stop();
+  const box = new Inbox(dir);
+  assert.ok(box.all().some(m => m.text === "saved completed output" && m.delivery === "pending"));
+  const healthy = new FakeRelay(), nextHandler = new FakeHandler();
+  const restarted = new Daemon({config, relay: healthy, inbox: box, handler: nextHandler, ask: actAsk});
+  try {
+    await restarted.start(); await tick();
+    assert.equal(nextHandler.prompts.length, 0);
+    assert.equal(healthy.received(friend).filter(m => m.type === "done").length, 1);
+    assert.equal(healthy.received(friend).find(m => m.type === "done")?.text, "saved completed output");
+  } finally { restarted.stop(); }
+});
+
+test("restart resumes never-started work in order, with admission and deduplication intact", async () => {
+  const judgment = deferred();
+  const {d, config, relay, handler, me, friend, dir} = setup({owner: undefined}, async (s, q) => { await judgment.promise; return actAsk(s, q); });
+  await d.start();
+  const first = wrap(friend, pubkeyOf(me), {type: "ask", text: "first pending task"});
+  const second = wrap(friend, pubkeyOf(me), {type: "answer", text: "second pending task", thread: first.id});
+  await relay.publish(first.wraps); await tick();
+  await relay.publish(second.wraps); await tick();
+  d.stop(); judgment.resolve(); await tick();
+  assert.equal(handler.prompts.length, 0, "shutdown must not start the waiting turn");
+  const healthy = new FakeRelay(), nextHandler = new FakeHandler();
+  const restarted = new Daemon({config, relay: healthy, inbox: new Inbox(dir), handler: nextHandler, ask: actAsk});
+  try {
+    await restarted.start(); await tick(180);
+    await healthy.publish([...first.wraps, ...second.wraps]); await tick();
+    assert.equal(nextHandler.prompts.length, 2);
+    assert.match(nextHandler.prompts[0].text, /first pending task/);
+    assert.ok(!nextHandler.prompts[0].text.includes("second pending task"));
+    assert.match(nextHandler.prompts[1].text, /second pending task/);
+  } finally { restarted.stop(); }
+});
+
+test("restart flags interrupted work once, holds its follow-ups, and never blindly repeats agent actions", async () => {
+  const {d, config, relay, handler, me, friend, dir} = setup({owner: undefined});
+  handler.prompt = async () => new Promise(() => {});
+  await d.start();
+  const active = wrap(friend, pubkeyOf(me), {type: "ask", text: "partially executed task", attention: "none"});
+  await relay.publish(active.wraps); await tick(80);
+  await relay.publish(wrap(friend, pubkeyOf(me), {type: "answer", text: "dependent follow-up", thread: active.id}).wraps);
+  await tick(); d.stop();
+  for (let restart = 0; restart < 2; restart++) {
+    const healthy = new FakeRelay(), nextHandler = new FakeHandler();
+    const restarted = new Daemon({config, relay: healthy, inbox: new Inbox(dir), handler: nextHandler, ask: actAsk});
+    try {
+      await restarted.start(); await tick(100);
+      assert.equal(nextHandler.prompts.length, 0);
+      assert.equal(new Inbox(dir).all().find(m => m.id === active.id)?.work, "interrupted");
+      assert.equal(restarted.timeline().messages.find(m => m.id === active.id)?.attention, "now");
+      assert.ok(restarted.inbox({waiting_on_me: true, unread_only: false}).some(m => m.id === active.id));
+      assert.equal(healthy.received(friend).filter(m => m.type === "cant" && /interrupted/i.test(m.text)).length, restart === 0 ? 1 : 0);
+    } finally { restarted.stop(); }
+  }
+});
+
+test("recovery reapplies consent and leaves historical messages alone", async () => {
+  const judgment = deferred();
+  const {d, config, relay, me, friend, dir, box} = setup({owner: undefined}, async (s, q) => { await judgment.promise; return actAsk(s, q); });
+  box.append(wrap(friend, pubkeyOf(me), {type: "ask", text: "old untracked message"}).message);
+  await d.start();
+  const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "permission since revoked"});
+  await relay.publish(request.wraps); await tick(); d.stop();
+  judgment.resolve(); await tick();
+  const nextHandler = new FakeHandler();
+  const restarted = new Daemon({config: {...config, allow: []}, relay: new FakeRelay(), handler: nextHandler, inbox: new Inbox(dir), ask: actAsk});
+  try {
+    await restarted.start(); await tick(100);
+    assert.equal(nextHandler.prompts.length, 0);
+    assert.equal(new Inbox(dir).parked().find(m => m.id === request.id)?.text, "permission since revoked");
+  } finally { restarted.stop(); }
+});
+
+test("explicit cancellation stays cancelled after a restart", async () => {
+  const {d, config, relay, handler, me, friend, dir} = setup({owner: undefined});
+  handler.prompt = async () => new Promise(() => {});
+  await d.start();
+  const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "cancelled task"});
+  await relay.publish(request.wraps); await tick();
+  await relay.publish(wrap(friend, pubkeyOf(me), {type: "answer", thread: request.id, text: "queued before cancel"}).wraps); await tick();
+  await d.cancel(request.id); d.stop();
+  const nextHandler = new FakeHandler(), healthy = new FakeRelay();
+  const restarted = new Daemon({config, relay: healthy, handler: nextHandler, inbox: new Inbox(dir), ask: actAsk});
+  try {
+    await restarted.start(); await tick(100);
+    assert.equal(nextHandler.prompts.length, 0);
+    assert.equal(healthy.received(friend).length, 0, "no spurious interruption notice for explicitly cancelled work");
+  } finally { restarted.stop(); }
+});
+
+test("sending while offline cannot move the replay window past older unread DMs", async t => {
+  const {d, relay, friend, me, handler} = setup({owner: undefined});
+  t.mock.timers.enable({apis: ["Date"], now: Date.now() - 5 * 86400_000});
+  const missed = wrap(friend, pubkeyOf(me), {type: "ask", text: "waiting on relay for five days"});
+  t.mock.timers.reset();
+  await d.send({to: pubkeyOf(friend), text: "newer outgoing message"});
+  relay.subscribeInbox = (_pubkey, since, cb) => {
+    if (missed.wraps[0].created_at >= Math.max(0, since - 2 * 86400)) setTimeout(() => cb(missed.wraps[0]), 0);
+    return () => {};
+  };
+  try {
+    await d.start(); await tick(100);
+    assert.equal(handler.prompts.length, 1);
+    assert.match(handler.prompts[0].text, /waiting on relay for five days/);
+  } finally { d.stop(); }
+});
+
+test("a restart while an interrupted agent is still stopping holds all work for review", async () => {
+  const {d, relay, config, handler, friend, me, dir} = setup({owner: undefined}, async (s, q) => {
+    if ("changes_work" in q) return {changes_work: noul(0.99)};
+    return actAsk(s, q);
+  });
+  handler.prompt = async () => new Promise(() => {});
+  await d.start();
+  const root = wrap(friend, pubkeyOf(me), {type: "ask", text: "active task"});
+  await relay.publish(root.wraps); await tick();
+  const correction = wrap(friend, pubkeyOf(me), {type: "answer", text: "Stop and use the corrected requirement", thread: root.id});
+  await relay.publish(correction.wraps); await tick();
+  assert.equal(new Inbox(dir).get(correction.id)?.steering?.action, "interrupt");
+  d.stop();
+  const nextHandler = new FakeHandler();
+  const restarted = new Daemon({config, relay: new FakeRelay(), handler: nextHandler, inbox: new Inbox(dir), ask: actAsk});
+  try {
+    await restarted.start(); await tick(100);
+    assert.equal(nextHandler.prompts.length, 0, "the cancelled subprocess never confirmed it stopped");
+    assert.equal(new Inbox(dir).get(root.id)?.work, "interrupted");
+  } finally { restarted.stop(); }
+});
+
+test("restart preserves a correction's place ahead of older queued messages", async () => {
+  const turn = deferred(), judgment = deferred(), correcting = deferred();
+  const {d, config, relay, handler, friend, me, dir} = setup({owner: undefined}, async (s, q) => {
+    if ("changes_work" in q) return {changes_work: noul((s as {new_message: string}).new_message === "correction first" ? 0.99 : 0)};
+    if ("action" in q && (s as {message: {text: string}}).message.text === "correction first") { correcting.resolve(); await judgment.promise; }
+    return actAsk(s, q);
+  });
+  handler.prompt = async () => { await turn.promise; return {text: "superseded", stopReason: "end_turn"}; };
+  handler.cancel = async () => { turn.resolve(); return true; };
+  await d.start();
+  const root = wrap(friend, pubkeyOf(me), {type: "ask", text: "original task"});
+  await relay.publish(root.wraps); await tick();
+  await relay.publish(wrap(friend, pubkeyOf(me), {type: "answer", text: "older queued aside", thread: root.id}).wraps); await tick();
+  await relay.publish(wrap(friend, pubkeyOf(me), {type: "answer", text: "correction first", thread: root.id}).wraps);
+  await correcting.promise;
+  d.stop(); judgment.resolve(); await tick();
+  const order: string[] = [], nextHandler = new FakeHandler();
+  const restarted = new Daemon({config, relay: new FakeRelay(), handler: nextHandler, inbox: new Inbox(dir), ask: async (s, q) => {
+    if ("action" in q) order.push((s as {message: {text: string}}).message.text);
+    return actAsk(s, q);
+  }});
+  try {
+    await restarted.start(); await tick(150);
+    assert.deepEqual(order, ["correction first", "older queued aside"]);
+  } finally { restarted.stop(); }
+});
+
 test("attention labels reach the peer and owner without suppressing agent work", async () => {
   for (const level of ["now", "later", "none"] as const) {
     const {d, relay, me, friend, owner, notes, handler} = setup({}, async (s, q) => {

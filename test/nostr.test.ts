@@ -117,6 +117,7 @@ class FakeSocket {
   static OPEN = 1;
   static store: Event[] = [];
   static sockets: FakeSocket[] = [];
+  static offline = new Set<string>();
   readyState = 1;
   url: string;
   onopen: (() => void) | null = null;
@@ -127,7 +128,7 @@ class FakeSocket {
   constructor(url: string) {
     this.url = url;
     FakeSocket.sockets.push(this);
-    setTimeout(() => this.onopen?.(), 0);
+    setTimeout(() => FakeSocket.offline.has(url) ? this.onerror?.() : this.onopen?.(), 0);
   }
   send(raw: string) {
     const [verb, a, b] = JSON.parse(raw);
@@ -180,4 +181,63 @@ test("relay publishes, delivers to a live inbox subscription, and finds agents",
 
   stop();
   relay.close();
+});
+
+test("a failed relay reconnects independently and replays fuzzed wraps without duplicate delivery", async () => {
+  __setWebSocketForTests(FakeSocket as unknown as typeof WebSocket);
+  const a = secretFromNsec(generateNsec()), b = secretFromNsec(generateNsec());
+  const relay = new Relay(["wss://recovery.one", "wss://recovery.two"]);
+  const got: string[] = [];
+  const since = Math.floor(Date.now() / 1000);
+  const stop = relay.subscribeInbox(pubkeyOf(b), since, ev => got.push(ev.id));
+  try {
+    await new Promise(r => setTimeout(r, 20));
+    const socket = FakeSocket.sockets.find(s => s.url === "wss://recovery.one/")!;
+    const filter = [...socket.subs.values()][0];
+    const first = wrap(a, pubkeyOf(b), {text: "before drop", type: "ask"}).wraps[0];
+    FakeSocket.store.push(first);
+    for (const id of socket.subs.keys()) socket.reply(["EVENT", id, first]);
+    await new Promise(r => setTimeout(r, 20));
+    socket.close();
+    const missed = wrap(a, pubkeyOf(b), {text: "while offline", type: "ask"}).wraps[0];
+    FakeSocket.store.push(missed);
+    await new Promise(r => setTimeout(r, 1200));
+    assert.deepEqual(new Set(got), new Set([first.id, missed.id]));
+    assert.equal(got.length, 2);
+    const reconnected = FakeSocket.sockets.filter(s => s.url === socket.url).at(-1)!;
+    assert.notEqual(reconnected, socket);
+    assert.deepEqual([...reconnected.subs.values()][0], filter, "keep the full NIP-17 rewind, not lastEmitted+1");
+  } finally { stop(); relay.close(); }
+});
+
+test("initial connection failure retries, and closing stops further attempts", async () => {
+  __setWebSocketForTests(FakeSocket as unknown as typeof WebSocket);
+  const url = "wss://starts-offline.example/";
+  FakeSocket.offline.add(url);
+  const relay = new Relay([url]);
+  relay.subscribeInbox(pubkeyOf(secretFromNsec(generateNsec())), 0, () => {});
+  try {
+    await new Promise(r => setTimeout(r, 30));
+    FakeSocket.offline.delete(url);
+    await new Promise(r => setTimeout(r, 1200));
+    const sockets = FakeSocket.sockets.filter(s => s.url === url);
+    assert.ok(sockets.length > 1);
+    assert.ok(sockets.at(-1)!.subs.size > 0);
+    sockets.at(-1)!.close();
+    relay.close();
+    await new Promise(r => setTimeout(r, 1200));
+    assert.equal(FakeSocket.sockets.filter(s => s.url === url).length, sockets.length);
+  } finally { FakeSocket.offline.delete(url); relay.close(); }
+});
+
+test("repeated connection failures back off instead of reconnecting every second", async () => {
+  __setWebSocketForTests(FakeSocket as unknown as typeof WebSocket);
+  const url = "wss://stays-offline.example/";
+  FakeSocket.offline.add(url);
+  const relay = new Relay([url]);
+  relay.subscribeInbox(pubkeyOf(secretFromNsec(generateNsec())), 0, () => {});
+  try {
+    await new Promise(r => setTimeout(r, 2600));
+    assert.equal(FakeSocket.sockets.filter(s => s.url === url).length, 2, "first retry at 1s; next retry at 3s");
+  } finally { relay.close(); FakeSocket.offline.delete(url); }
 });

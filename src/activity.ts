@@ -24,8 +24,8 @@ const activitySchema = z.object({
 export type TimelineMessage = Stored & { observedBy?: string };
 
 /** Owner presentation only. Missing labels stay visible; blockers cannot be silenced. */
-export function attentionOf(m: Pick<Stored, "type" | "attention" | "triage" | "parked" | "verification">): Attention {
-  if (m.type === "cant" || m.type === "escalate" || m.parked || m.triage?.action === "escalate" || ["failed", "unavailable"].includes(m.verification?.status ?? "")) return "now";
+export function attentionOf(m: Pick<Stored, "type" | "attention" | "triage" | "parked" | "verification" | "work">): Attention {
+  if (m.type === "cant" || m.type === "escalate" || m.parked || m.work === "interrupted" || m.triage?.action === "escalate" || ["failed", "unavailable"].includes(m.verification?.status ?? "")) return "now";
   if (["ack", "reaction", "activity", "cancel"].includes(m.type)) return "none";
   return m.attention ?? "now";
 }

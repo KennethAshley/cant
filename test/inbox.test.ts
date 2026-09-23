@@ -58,3 +58,24 @@ test("shared observations never become handler thread context", () => {
   box.append(m("ask", { thread: "task", text: "real request" }));
   assert.deepEqual(box.thread("task").map(s => s.text), ["real request"]);
 });
+
+test("an interrupted final append does not lose earlier records or corrupt the next write", () => {
+  const d = dir(), file = path.join(d, "inbox.jsonl");
+  new Inbox(d).append(m("before", {text: "日本語"}));
+  fs.appendFileSync(file, '{"id":"partial');
+  const box = new Inbox(d);
+  assert.deepEqual(box.all().map(s => s.id), ["before"]);
+  box.append(m("after"));
+  assert.deepEqual(new Inbox(d).all().map(s => s.id), ["before", "after"]);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+});
+
+test("a complete final record without a newline is preserved; earlier corruption is reported", () => {
+  const d = dir(), file = path.join(d, "inbox.jsonl");
+  new Inbox(d).append(m("first"));
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").trimEnd());
+  new Inbox(d).append(m("second"));
+  assert.equal(new Inbox(d).all().length, 2);
+  fs.appendFileSync(file, 'broken\n');
+  assert.throws(() => new Inbox(d), /JSON|Unexpected/i);
+});

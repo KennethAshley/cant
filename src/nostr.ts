@@ -182,11 +182,12 @@ export function __setWebSocketForTests(ws: typeof WebSocket): void {
 }
 
 export class Relay {
-  private pool = new SimplePool();
-  private seen = new Set<string>();
+  private pool = new SimplePool({ enablePing: true });
+  private subscriptions = new Set<() => void>();
   private urls: string[];
   constructor(urls: string[]) {
     this.urls = urls;
+    this.pool.maxWaitForConnection = 5000;
   }
 
   /** Publish to every relay. Resolves if any relay accepts; rejects only if all refuse. */
@@ -201,18 +202,37 @@ export class Relay {
 
   /** Live subscription for gift wraps addressed to `pubkey`. Dedupes across relays. */
   subscribeInbox(pubkey: string, sinceS: number, onEvent: (ev: Event) => void): () => void {
-    const sub = this.pool.subscribeMany(
-      this.urls,
-      { kinds: [KIND_GIFT_WRAP], "#p": [pubkey], since: Math.max(0, sinceS - DM_FUZZ_WINDOW_S) },
-      {
-        onevent: (ev) => {
-          if (this.seen.has(ev.id)) return;
-          this.seen.add(ev.id);
-          onEvent(ev);
-        },
-      },
-    );
-    return () => sub.close();
+    const seen = new Set<string>();
+    const stops = [...new Set(this.urls)].map(url => {
+      let stopped = false, delay = 1000;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let sub: ReturnType<SimplePool["subscribeMany"]> | undefined;
+      const connect = () => {
+        if (stopped) return;
+        // Reissue the original filter: gift-wrap timestamps are randomized, not arrival cursors.
+        sub = this.pool.subscribeMany([url],
+          { kinds: [KIND_GIFT_WRAP], "#p": [pubkey], since: Math.max(0, sinceS - DM_FUZZ_WINDOW_S) }, {
+            onevent: ev => {
+              delay = 1000;
+              if (stopped || seen.has(ev.id)) return;
+              onEvent(ev);
+              seen.add(ev.id);
+            },
+            // The pool also calls oneose on connection failure, so it cannot reset backoff.
+            onclose: () => {
+              if (stopped) return;
+              timer = setTimeout(connect, delay);
+              timer.unref();
+              delay = Math.min(delay * 2, 30_000);
+            },
+          });
+      };
+      connect();
+      return () => { stopped = true; clearTimeout(timer); sub?.close(); };
+    });
+    const stop = () => { stops.forEach(stop => stop()); this.subscriptions.delete(stop); };
+    this.subscriptions.add(stop);
+    return stop;
   }
 
   async findAgents(): Promise<Profile[]> {
@@ -226,6 +246,7 @@ export class Relay {
   }
 
   close(): void {
+    for (const stop of this.subscriptions) stop();
     this.pool.close(this.urls);
   }
 }
