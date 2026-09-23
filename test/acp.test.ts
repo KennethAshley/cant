@@ -28,7 +28,20 @@ test("cancel stops a running turn", async () => {
   assert.equal(await h.cancel("t1"), true);
   const r = await p;
   assert.equal(r.stopReason, "cancelled");
+  assert.equal((await h.prompt("t1", "corrected request")).text, "echo: corrected request");
   h.close();
+});
+
+test("cancel during session creation prevents the prompt and leaves the session reusable", async () => {
+  const h = new Handler(fake, { permissions: "deny", timeoutMs: 5000 });
+  await h.start();
+  const p = h.prompt("fresh", "obsolete request");
+  p.catch(() => {});
+  try {
+    assert.equal(await h.cancel("fresh"), true);
+    assert.deepEqual(await p, {text: "", stopReason: "cancelled"});
+    assert.equal((await h.prompt("fresh", "new request")).text, "echo: new request");
+  } finally { h.close(); }
 });
 
 test("timeout rejects with a readable error", async () => {

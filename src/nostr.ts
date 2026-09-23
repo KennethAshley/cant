@@ -3,6 +3,7 @@ import * as nip19 from "nostr-tools/nip19";
 import * as nip44 from "nostr-tools/nip44";
 import * as nip59 from "nostr-tools/nip59";
 import { NAME } from "./config.ts";
+import { z } from "zod";
 
 export const KIND_PROFILE = 0;
 export const KIND_DM = 14;
@@ -11,7 +12,21 @@ export const KIND_GIFT_WRAP = 1059;
 export const DM_FUZZ_WINDOW_S = 2 * 86_400;
 
 export const MESSAGE_TYPES = ["ask", "ack", "answer", "done", "cant", "cancel", "escalate"] as const;
-export type MessageType = (typeof MESSAGE_TYPES)[number];
+export type MessageType = (typeof MESSAGE_TYPES)[number] | "reaction" | "activity";
+export const verificationSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("passed"), probability: z.number().min(0).max(1) }),
+  z.object({ status: z.literal("failed"), probability: z.number().min(0).max(1) }),
+  z.object({ status: z.literal("unavailable") }),
+  z.object({ status: z.literal("skipped") }),
+]);
+export type Verification = z.infer<typeof verificationSchema>;
+export const attentionSchema = z.enum(["now", "later", "none"]);
+export type Attention = z.infer<typeof attentionSchema>;
+export type Outgoing = Pick<Message, "text" | "type"> & Partial<Pick<Message, "thread" | "depth" | "reactionTo" | "verification" | "attention">>;
+
+export function validTimestamp(seconds: number): boolean {
+  return Number.isSafeInteger(seconds) && seconds >= 0 && seconds <= 8_640_000_000_000;
+}
 
 export interface Message {
   id: string;
@@ -23,6 +38,9 @@ export interface Message {
   depth: number;
   /** Real timestamp in seconds, from the rumor, never the wrap. */
   ts: number;
+  reactionTo?: string;
+  verification?: Verification;
+  attention?: Attention;
 }
 
 export interface Profile {
@@ -61,15 +79,24 @@ export function pubkeyFromNpub(npub: string): string {
 export function wrap(
   secret: Uint8Array,
   to: string,
-  msg: { text: string; type: MessageType; thread?: string; depth?: number },
-): { wraps: Event[]; id: string } {
+  msg: Outgoing,
+): { wraps: Event[]; id: string; message: Message } {
   const tags: string[][] = [["p", to], ["type", msg.type]];
-  if (msg.thread) tags.push(["e", msg.thread]);
+  if (msg.type === "reaction") {
+    if (!msg.reactionTo || !/^[0-9a-f]{64}$/.test(msg.reactionTo)) throw new Error("invalid reaction target");
+    if (!msg.text.trim() || msg.text.length > 32) throw new Error("reaction must be 1–32 characters");
+    tags.push(["e", msg.reactionTo], ["k", String(KIND_DM)]);
+    if (msg.thread) tags.push(["thread", msg.thread]);
+  } else if (msg.thread) tags.push(["e", msg.thread]);
+  if (msg.verification) tags.push(["verification", JSON.stringify(verificationSchema.parse(msg.verification))]);
+  if (msg.attention) tags.push(["attention", attentionSchema.parse(msg.attention)]);
   if (msg.depth) tags.push(["depth", String(msg.depth)]);
-  const rumor = nip59.createRumor({ kind: KIND_DM, tags, content: msg.text }, secret);
+  const rumor = nip59.createRumor({ kind: msg.type === "reaction" ? 7 : KIND_DM, tags, content: msg.text }, secret);
   const self = getPublicKey(secret);
   const wraps = [to, self].map((pk) => nip59.createWrap(nip59.createSeal(rumor, secret, pk), pk) as Event);
-  return { wraps, id: rumor.id };
+  const message: Message = { id: rumor.id, thread: msg.thread ?? rumor.id, from: self, to, type: msg.type, text: msg.text, depth: msg.depth ?? 0, ts: rumor.created_at,
+    ...(msg.reactionTo ? { reactionTo: msg.reactionTo } : {}), ...(msg.verification ? { verification: msg.verification } : {}), ...(msg.attention ? { attention: msg.attention } : {}) };
+  return { wraps, id: rumor.id, message };
 }
 
 /** Decrypt and authenticate a gift wrap addressed to me. Undefined for anything not ours. */
@@ -88,20 +115,32 @@ function unwrapRumor(event: Event, secret: Uint8Array): Event | undefined {
 
 export function unwrap(event: Event, secret: Uint8Array): Message | undefined {
   const rumor = unwrapRumor(event, secret);
-  if (!rumor || rumor.kind !== KIND_DM) return undefined;
+  if (!rumor || (rumor.kind !== KIND_DM && rumor.kind !== 7) || !validTimestamp(rumor.created_at)) return undefined;
   const tag = (k: string) => rumor.tags.find((t) => t[0] === k)?.[1];
-  const type = tag("type");
+  const type = rumor.kind === 7 ? "reaction" : tag("type");
   const to = tag("p");
-  if (!to || !MESSAGE_TYPES.includes(type as MessageType)) return undefined;
+  if (!to || ![...MESSAGE_TYPES, "reaction", "activity"].includes(type ?? "")) return undefined;
+  const depth = Number(tag("depth") ?? 0);
+  if (!Number.isSafeInteger(depth) || depth < 0) return undefined;
+  const reactionTo = type === "reaction" ? tag("e") : undefined;
+  if (type === "reaction" && (rumor.kind !== 7 || !reactionTo || !/^[0-9a-f]{64}$/.test(reactionTo) || !rumor.content.trim() || rumor.content.length > 32)) return undefined;
+  let verification: Verification | undefined;
+  const attention = attentionSchema.safeParse(tag("attention"));
+  if (tag("verification")) {
+    try { verification = verificationSchema.parse(JSON.parse(tag("verification")!)); } catch { /* Ignore invalid optional evidence. */ }
+  }
   return {
     id: rumor.id,
-    thread: tag("e") ?? rumor.id,
+    thread: (type === "reaction" ? tag("thread") ?? reactionTo : tag("e")) ?? rumor.id,
     from: rumor.pubkey,
     to,
     type: type as MessageType,
     text: rumor.content,
-    depth: Number(tag("depth") ?? 0),
+    depth,
     ts: rumor.created_at,
+    ...(reactionTo ? { reactionTo } : {}),
+    ...(verification ? { verification } : {}),
+    ...(attention.success ? { attention: attention.data } : {}),
   };
 }
 

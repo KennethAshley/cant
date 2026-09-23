@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { unwrapEvent, createRumor, createSeal, createWrap } from "nostr-tools/nip59";
 import {
   generateNsec, secretFromNsec, pubkeyOf, npubOf, pubkeyFromNpub,
   wrap, unwrap, profileEvent, parseProfile,
@@ -39,6 +40,19 @@ test("first message of a thread uses its own id as thread", () => {
   assert.equal(got?.depth, 0);
 });
 
+test("encrypted attention labels round-trip; invalid labels leave the message visible", () => {
+  const a = secretFromNsec(generateNsec()), b = secretFromNsec(generateNsec());
+  for (const attention of ["now", "later", "none"] as const) {
+    const {wraps, message} = wrap(a, pubkeyOf(b), {text: "result", type: "done", attention});
+    assert.equal(unwrap(wraps[0], b)?.attention, attention);
+    assert.equal(message.attention, attention);
+  }
+  const rumor = createRumor({kind: 14, content: "result", tags: [["p", pubkeyOf(b)], ["type", "done"], ["attention", "bogus"]]}, a);
+  const message = unwrap(createWrap(createSeal(rumor, a, pubkeyOf(b)), pubkeyOf(b)), b);
+  assert.equal(message?.text, "result");
+  assert.equal(message?.attention, undefined);
+});
+
 test("unwrap returns undefined for a wrap not addressed to me", () => {
   const a = secretFromNsec(generateNsec());
   const b = secretFromNsec(generateNsec());
@@ -61,6 +75,37 @@ test("profile event round-trips and carries the t tag", () => {
   assert.ok(ev.tags.some((t) => t[0] === "t" && t[1] === "sidecar"));
   const p = parseProfile(ev);
   assert.deepEqual(p, { pubkey: pubkeyOf(a), name: "bot", about: "does things", capabilities: ["review", "docs"] });
+});
+
+test("reactions use an encrypted kind 7 event tied to the exact message", () => {
+  const a = secretFromNsec(generateNsec());
+  const b = secretFromNsec(generateNsec());
+  const target = "a".repeat(64);
+  const thread = "b".repeat(64);
+  const { wraps } = wrap(a, pubkeyOf(b), { text: "👍", type: "reaction", reactionTo: target, thread });
+  assert.equal(wraps[0].kind, 1059);
+  const rumor = unwrapEvent(wraps[0], b);
+  assert.equal(rumor.kind, 7);
+  assert.equal(rumor.content, "👍");
+  assert.deepEqual(rumor.tags.find(t => t[0] === "e"), ["e", target]);
+  assert.equal(unwrap(wraps[0], b)?.reactionTo, target);
+  assert.equal(unwrap(wraps[0], b)?.thread, thread);
+  assert.throws(() => wrap(a, pubkeyOf(b), { text: "👍", type: "reaction" }), /reaction target/);
+});
+
+test("rejects authenticated messages with timestamps outside the displayable range", () => {
+  const a = secretFromNsec(generateNsec()), b = secretFromNsec(generateNsec());
+  const rumor = createRumor({ kind: 14, content: "bad date", created_at: 8640000000001, tags: [["p", pubkeyOf(b)], ["type", "answer"]] }, a);
+  const event = createWrap(createSeal(rumor, a, pubkeyOf(b)), pubkeyOf(b));
+  assert.equal(unwrap(event, b), undefined);
+});
+
+test("invalid depths cannot bypass the conversation chain limit", () => {
+  const a = secretFromNsec(generateNsec()), b = secretFromNsec(generateNsec());
+  for (const depth of ["-1", "1.5", "NaN", "Infinity"]) {
+    const rumor = createRumor({kind: 14, content: "reply", tags: [["p", pubkeyOf(b)], ["type", "answer"], ["depth", depth]]}, a);
+    assert.equal(unwrap(createWrap(createSeal(rumor, a, pubkeyOf(b)), pubkeyOf(b)), b), undefined, depth);
+  }
 });
 
 // relay

@@ -14,6 +14,10 @@ export interface Config {
   about: string;
   capabilities: string[];
   owner?: string;
+  /** Explicitly share encrypted conversation copies with the configured owner. */
+  share_activity?: boolean;
+  /** Shared Jev gateway; this is a client credential, never the TypeSafe provider key. */
+  judge?: { url: string; key: string };
   handler: string;
   acp: { permissions: "allow" | "deny" };
   notify: string;
@@ -31,7 +35,7 @@ export function home(): string {
 
 export function defaultConfig(overrides: Partial<Config> & { nsec: string; name: string }): Config {
   return {
-    relays: ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net"],
+    relays: ["wss://relay.fez.chat"],
     about: "",
     capabilities: [],
     handler: "npx -y @agentclientprotocol/claude-agent-acp",

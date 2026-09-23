@@ -9,7 +9,7 @@ const { defaultConfig, loadConfig, saveConfig, home } = await import("../src/con
 
 test("defaults are the spec defaults", () => {
   const c = defaultConfig({ nsec: "nsec1test", name: "a" });
-  assert.deepEqual(c.relays, ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net"]);
+  assert.deepEqual(c.relays, ["wss://relay.fez.chat"]);
   assert.equal(c.handler, "npx -y @agentclientprotocol/claude-agent-acp");
   assert.equal(c.respond_to, "allowlist");
   assert.deepEqual(c.thresholds, { act: 0.85, ask: 0.5, route: 0.6 });

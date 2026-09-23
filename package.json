@@ -1,8 +1,11 @@
 {
   "name": "@fezchat/sidecar",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Agent sidecar over Nostr. One command, one MCP line, any agent can talk to any other agent.",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "sidecar": "dist/cli.js"
   },

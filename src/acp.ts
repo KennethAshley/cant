@@ -16,6 +16,7 @@ export class Handler {
   private child?: ChildProcess;
   private ctx?: ClientContext;
   private sessions = new Map<string, ActiveSession>();
+  private prompts = new Map<string, { cancelled: boolean; session?: ActiveSession }>();
   private release?: () => void;
   private stderrTail = "";
   alive = false;
@@ -73,36 +74,45 @@ export class Handler {
   /** Send one prompt on the thread's session and collect the reply text until the turn stops. */
   async prompt(thread: string, text: string): Promise<{ text: string; stopReason: string }> {
     if (!this.alive) throw new Error(`${this.command} is not running`);
-    const s = await this.session(thread);
-    const deadline = Date.now() + this.opts.timeoutMs;
-    const promptFailed = new Promise<never>((_, reject) => { s.prompt(text).catch(reject); });
-    promptFailed.catch(() => {});
-    let out = "";
-    while (true) {
-      const left = deadline - Date.now();
-      if (left <= 0) {
-        await this.cancel(thread);
-        throw new Error(`${this.command} timed out after ${this.opts.timeoutMs}ms on thread ${thread}`);
+    const turn: { cancelled: boolean; session?: ActiveSession } = { cancelled: false };
+    this.prompts.set(thread, turn);
+    try {
+      const s = await this.session(thread);
+      if (turn.cancelled) return { text: "", stopReason: "cancelled" };
+      turn.session = s;
+      const deadline = Date.now() + this.opts.timeoutMs;
+      const promptFailed = new Promise<never>((_, reject) => { s.prompt(text).catch(reject); });
+      promptFailed.catch(() => {});
+      let out = "";
+      while (true) {
+        const left = deadline - Date.now();
+        if (left <= 0) {
+          await this.cancel(thread);
+          throw new Error(`${this.command} timed out after ${this.opts.timeoutMs}ms on thread ${thread}`);
+        }
+        let timer: NodeJS.Timeout | undefined;
+        const timeout = new Promise<"tick">((resolve) => { timer = setTimeout(() => resolve("tick"), left); });
+        let msg;
+        try {
+          msg = await Promise.race([s.nextUpdate(), timeout, promptFailed]);
+        } finally {
+          clearTimeout(timer);
+        }
+        if (msg === "tick") continue;
+        if (msg.kind === "stop") return { text: out.trim(), stopReason: msg.stopReason };
+        const u = msg.update;
+        if (u.sessionUpdate === "agent_message_chunk" && u.content.type === "text") out += u.content.text;
       }
-      let timer: NodeJS.Timeout | undefined;
-      const timeout = new Promise<"tick">((resolve) => { timer = setTimeout(() => resolve("tick"), left); });
-      let msg;
-      try {
-        msg = await Promise.race([s.nextUpdate(), timeout, promptFailed]);
-      } finally {
-        clearTimeout(timer);
-      }
-      if (msg === "tick") continue;
-      if (msg.kind === "stop") return { text: out.trim(), stopReason: msg.stopReason };
-      const u = msg.update;
-      if (u.sessionUpdate === "agent_message_chunk" && u.content.type === "text") out += u.content.text;
+    } finally {
+      this.prompts.delete(thread);
     }
   }
 
   async cancel(thread: string): Promise<boolean> {
-    const s = this.sessions.get(thread);
-    if (!s || !this.ctx) return false;
-    await this.ctx.notify("session/cancel", { sessionId: s.sessionId });
+    const turn = this.prompts.get(thread);
+    if (!turn) return false;
+    turn.cancelled = true;
+    if (turn.session && this.ctx) await this.ctx.notify("session/cancel", { sessionId: turn.session.sessionId });
     return true;
   }
 

@@ -57,6 +57,10 @@ export async function serveMcp(): Promise<void> {
     inputSchema: { query: z.string().optional() },
   }, call("find_agents"));
   server.registerTool("whoami", { description: "This agent's npub, name, and capabilities.", inputSchema: {} }, call("whoami"));
+  server.registerTool("react", {
+    description: "Add an encrypted emoji reaction to a message by its id.",
+    inputSchema: { id: z.string(), text: z.string().min(1).max(32) },
+  }, call("react"));
 
   await server.connect(new StdioServerTransport());
 }

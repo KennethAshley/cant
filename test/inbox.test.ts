@@ -51,3 +51,10 @@ test("lastSeen is the newest ts, sessions round-trip", () => {
   box.saveSessions({ t1: "s1" });
   assert.deepEqual(new Inbox(d).sessions(), { t1: "s1" });
 });
+
+test("shared observations never become handler thread context", () => {
+  const box = new Inbox(dir());
+  box.append(m("copy", { thread: "task", type: "activity", text: "observation only" }));
+  box.append(m("ask", { thread: "task", text: "real request" }));
+  assert.deepEqual(box.thread("task").map(s => s.text), ["real request"]);
+});

@@ -63,6 +63,7 @@ async function up(): Promise<void> {
   const stop = await serveHttp(daemon, config.port);
   const persist = setInterval(() => saveConfig(daemon.config()), 10_000);
   console.log(`${NAME} up as ${daemon.whoami().npub} on port ${config.port}`);
+  console.log(`conversations: http://localhost:${config.port}`);
   const shutdown = () => { clearInterval(persist); saveConfig(daemon.config()); stop(); daemon.stop(); process.exit(0); };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

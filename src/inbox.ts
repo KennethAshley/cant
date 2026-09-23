@@ -2,13 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { home } from "./config.ts";
 import type { Message } from "./nostr.ts";
-import type { Triage } from "./decide.ts";
+import type { Triage, Steering } from "./decide.ts";
 
 export interface Stored extends Message {
   receivedAt: number;
   read: boolean;
   parked?: boolean;
   triage?: Triage;
+  steering?: Steering;
 }
 
 type Line = Stored | { id: string; patch: Partial<Stored> };
@@ -60,8 +61,9 @@ export class Inbox {
   unread(): Stored[] { return this.all().filter((s) => !s.read); }
   markRead(ids: string[]): void { for (const id of ids) this.patch(id, { read: true }); }
   setTriage(id: string, triage: Triage): void { this.patch(id, { triage }); }
+  setSteering(id: string, steering: Steering): void { this.patch(id, { steering }); }
   park(id: string): void { this.patch(id, { parked: true }); }
-  thread(id: string): Stored[] { return this.all().filter((s) => s.thread === id); }
+  thread(id: string): Stored[] { return this.all().filter((s) => s.thread === id && s.type !== "activity"); }
   parked(): Stored[] { return this.all().filter((s) => s.parked); }
   unpark(from: string): Stored[] {
     const out = this.parked().filter((s) => s.from === from);
