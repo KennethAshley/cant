@@ -35,7 +35,7 @@ export const uiHtml = `<!doctype html>
   </footer>
 </aside>
 <main id="main" tabindex="-1">
-  <header class="conversation-header"><div><h2 id="conversation-title"># conversations</h2><p id="conversation-context">Your local chat log</p></div><button id="copy-thread" class="secondary" hidden>Copy thread ID</button></header>
+  <header class="conversation-header"><div><h2 id="conversation-title"># conversations</h2><p id="conversation-context">Your local chat log</p></div><div id="thread-controls" hidden><div class="control-buttons"><button id="stop-thread" class="secondary" title="Cancel current and queued work on this conversation">Stop</button><button id="pause-thread" class="secondary" title="Cancel the current turn and hold queued and new messages until resumed">Pause</button><button id="copy-thread" class="secondary" hidden>Copy thread ID</button></div><p id="control-status" role="status" aria-live="polite"></p></div></header>
   <div id="error" role="alert" hidden></div>
   <div id="timeline" class="timeline"><div class="empty"><div class="empty-mark" aria-hidden="true">#</div><h3>No conversation selected.</h3><p>Your agents’ messages and Jev decisions appear here.</p><p class="empty-hint">Send a message with your agent’s Sidecar tools to start a thread.</p></div></div>
   <div id="working" class="working" role="status" aria-live="polite" aria-atomic="true" hidden></div>
@@ -55,7 +55,7 @@ export const uiCss = `
 #threads{overflow:auto;min-height:100px;flex:1;padding:0 0 12px}.thread{display:block;width:100%;text-align:left;border:0;border-left:2px solid transparent;background:transparent;border-radius:0;padding:11px 10px;margin:0 0 3px}.thread:hover{background:var(--panel)}.thread[aria-current="true"]{background:var(--raised);border-left-color:var(--accent)}.thread-top{display:flex;align-items:center;gap:8px;margin-bottom:6px}.thread-title{font-size:12px;font-weight:600;color:var(--soft);flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.thread[aria-current="true"] .thread-title{color:var(--accent)}.thread-time{font-size:10px;color:var(--muted)}.thread-preview{font-size:11px;color:var(--muted);line-height:1.6;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.thread-status{display:block;margin-top:7px;font-size:9px;color:var(--secondary)}.thread-status.attention{color:var(--accent)}
 .agents-section{border-top:1px solid var(--line);padding:15px 0 8px;max-height:200px;overflow:auto}.text-button{background:transparent;border:0;font-size:10px;color:var(--secondary);padding:3px}.agent{display:flex;align-items:center;gap:9px;padding:7px 8px}.agent-name{font-size:11px;color:var(--soft);overflow-wrap:anywhere}.agent-caps{font-size:9px;color:var(--muted);margin-top:4px;max-width:178px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.muted{color:var(--muted);font-size:11px;padding:8px;line-height:1.7}
 .sidebar-footer{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);padding:11px 8px;font-size:9px;color:var(--muted)}#relay-name{display:block;font-size:11px;margin-top:4px;color:var(--soft)}.lock{font-size:18px;color:var(--secondary)}
-main{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--panel)}.conversation-header{min-height:73px;padding:14px 24px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:16px}.conversation-header h2{font-size:16px;font-weight:500;color:var(--accent);letter-spacing:-.3px;overflow-wrap:anywhere}.conversation-header p{font-size:10px;line-height:1.6;color:var(--muted);margin-top:6px}.secondary{background:transparent;border:1px solid var(--line);border-radius:3px;padding:7px 10px;font-size:10px;white-space:nowrap;color:var(--soft)}.secondary:hover{background:var(--raised);border-color:var(--muted)}
+main{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--panel)}.conversation-header{min-height:73px;padding:14px 24px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:16px}.conversation-header{flex-wrap:wrap}.control-buttons{display:flex;flex-wrap:wrap;gap:6px}#control-status{max-width:440px}.secondary:disabled{opacity:.5;cursor:wait}.conversation-header h2{font-size:16px;font-weight:500;color:var(--accent);letter-spacing:-.3px;overflow-wrap:anywhere}.conversation-header p{font-size:10px;line-height:1.6;color:var(--muted);margin-top:6px}.secondary{background:transparent;border:1px solid var(--line);border-radius:3px;padding:7px 10px;font-size:10px;white-space:nowrap;color:var(--soft)}.secondary:hover{background:var(--raised);border-color:var(--muted)}
 .timeline{overflow:auto;flex:1;padding:22px 24px 36px}.empty{margin:36px 0 0 70px;max-width:55ch;color:var(--muted)}.empty-mark{font-size:24px;color:var(--accent);margin-bottom:16px}.empty h3{font-size:15px;font-weight:500;color:var(--soft)}.empty p{font-size:12px;line-height:1.8;margin-top:12px}.empty .empty-hint{font-size:11px;margin-top:22px}.day-divider{display:flex;align-items:center;gap:16px;font-size:10px;color:var(--muted);margin:0 0 25px}.day-divider:after{content:"";height:1px;background:var(--line);flex:1}
 .message{display:grid;grid-template-columns:48px minmax(0,1fr);gap:20px;margin:0 0 26px}.message-time{color:var(--muted);font-size:10px;padding-top:3px;line-height:1.5}.message-content{min-width:0;max-width:80ch}.message-meta{display:flex;align-items:center;flex-wrap:wrap;gap:8px;font-size:10px;line-height:1.6;margin-bottom:7px;color:var(--muted)}.message-meta strong{font-size:12px;font-weight:600;color:var(--accent)}.message-meta strong:before{content:'<'}.message-meta strong:after{content:'>'}.message-meta .sender-1{color:var(--secondary)}.message-meta .sender-2{color:var(--tertiary)}.message-type{color:var(--muted)}.message-type:before{content:'['}.message-type:after{content:']'}.attention-label{margin-left:auto;color:var(--muted);font-size:10px}.attention-label.now{color:var(--accent)}.attention-label.later{color:var(--secondary)}
 .bubble{font-size:13px;line-height:1.8;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink)}.bubble strong{font-weight:650}.bubble code{font:inherit;color:var(--code);background:var(--base);padding:1px 4px;border-radius:2px}.bubble pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--base);border:1px solid var(--line);border-left:2px solid var(--accent);padding:12px 15px;margin:12px 0;font-size:12px;line-height:1.7}.bubble pre code{padding:0;background:none}.attribution{font-size:9px;color:var(--muted);margin-top:8px}
@@ -77,7 +77,7 @@ export const uiJs = appearanceJs + '\n' + threadTitle.toString() + String.raw`
 document.addEventListener('DOMContentLoaded', () => {
 const $ = id => document.getElementById(id);
 const el = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
-let state, selected = location.hash.slice(1), signature = '', busy = false, toastTimer;
+let state, selected = location.hash.slice(1), signature = '', busy = false, controlling = false, toastTimer;
 const expanded = new Set();
 const short = key => key ? key.slice(0, 8) + '…' : 'Unknown';
 const name = key => key === state.me.pubkey ? state.me.name : state.profiles.find(p => p.pubkey === key)?.name || short(key);
@@ -178,7 +178,8 @@ function reactions(message, messages) {
 }
 function renderConversation(messages) {
   const container = $('timeline'); const wasBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100; const oldTop = container.scrollTop;
-  container.replaceChildren(); $('copy-thread').hidden = !messages;
+  container.replaceChildren(); $('copy-thread').hidden = !messages; $('thread-controls').hidden = !messages;
+  renderControls();
   if (!messages) {
     $('conversation-title').textContent = '# conversations'; $('conversation-context').textContent = 'Your local chat log';
     const empty = el('div','empty'); empty.append(el('div','empty-mark','#'),el('h3','','No conversation selected.'),el('p','','Choose a conversation, or change the attention filter to see more.'),el('p','empty-hint','Send a message with your agent’s Sidecar tools. For an owner view, enable share_activity on your agents.')); container.append(empty); return;
@@ -197,6 +198,7 @@ function renderConversation(messages) {
     content.append(meta,renderBody(message.text));
     if (message.delivery === 'pending') content.append(el('p','attribution','Saved locally · waiting for relay'));
     if (message.work === 'interrupted') content.append(el('p','attribution','Interrupted · review before sending a new request'));
+    if (message.withheld) content.append(decision(message.id + '-held','Reply held for review',message.withheld.reason + '\n\nThis draft was not sent to the peer. Send a revised request to continue.\n\n' + message.withheld.text,'warn'));
     if (message.steering) {
       const s = message.steering; const label = s.action === 'interrupt' ? 'Interrupt previous turn' : 'Queue behind current turn';
       content.append(decision(message.id + '-steer',(s.probability === undefined ? 'Sidecar' : 'Jev') + ': ' + label,s.reason + (s.probability === undefined ? '' : '\nChanges the active work: ' + percent(s.probability))));
@@ -228,6 +230,24 @@ function render() {
   renderThreads(groups); renderAgents(); renderConversation(groups.find(([id]) => id === selected)?.[1]);
   renderWorking();
 }
+function threadPaused() {
+  return (state?.paused || []).includes(selected) || (state?.controls?.[selected] || []).some(c => c.paused || (c.action === 'pause' && c.accepted === undefined));
+}
+function renderControls() {
+  $('pause-thread').textContent = threadPaused() ? 'Resume' : 'Pause';
+  $('pause-thread').title = threadPaused() ? 'Release queued and new work; cancelled turns are not replayed' : 'Cancel the current turn and hold queued and new messages until resumed';
+  $('stop-thread').disabled = $('pause-thread').disabled = controlling;
+  const controls = state?.controls?.[selected] || [];
+  $('control-status').textContent = controls.map(c => name(c.pubkey) + ': ' + c.action + (c.accepted === true ? ' accepted' : c.accepted === false ? ' declined' : ' awaiting agent')).join(' · ') || (threadPaused() ? 'Paused · queued and new messages are held' : '');
+}
+async function controlThread(action) {
+  if (controlling || !selected) return;
+  const thread = selected;
+  controlling = true; renderControls();
+  try { await rpc('control',{thread,action}); await refresh(true); }
+  catch (error) { toast('Control request: ' + error.message); }
+  finally { controlling = false; renderControls(); }
+}
 function renderWorking() {
   const people = [...new Set((state?.working || []).filter(w => w.thread === selected && Date.now() - w.at < 8000).map(w => name(w.from)))];
   const label = people.length ? people.join(', ') + (people.length === 1 ? ' is working…' : ' are working…') : '';
@@ -248,6 +268,8 @@ async function discover() {
   const button = $('discover'); button.disabled = true;
   try { await rpc('find_agents'); await refresh(true); } catch (error) { toast('Could not refresh agents: ' + error.message); } finally { button.disabled = false; }
 }
+$('stop-thread').addEventListener('click',() => controlThread('stop'));
+$('pause-thread').addEventListener('click',() => controlThread(threadPaused() ? 'resume' : 'pause'));
 $('discover').addEventListener('click',discover);
 $('search').addEventListener('input',() => state && render());
 $('attention-filter').addEventListener('change',() => state && render());

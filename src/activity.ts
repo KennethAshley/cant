@@ -12,6 +12,7 @@ const activitySchema = z.object({
     depth: z.number().int().nonnegative(), ts: z.number().refine(validTimestamp),
     reactionTo: key.optional(), verification: verificationSchema.optional(), attention: attentionSchema.catch("now").optional(),
     title: titleSchema.optional().catch(undefined),
+    withheld: z.object({text: z.string().max(100_000), reason: z.string().max(2000)}).optional(),
     triage: z.object({
       action: z.enum(["act", "ask", "ignore", "escalate", "unavailable"]), confidence: probability,
       urgency: z.number().int().min(0).max(3), inScope: probability, contradiction: probability.optional(), reason: z.string().max(2000),
@@ -25,9 +26,9 @@ const activitySchema = z.object({
 export type TimelineMessage = Stored & { observedBy?: string };
 
 /** Owner presentation only. Missing labels stay visible; blockers cannot be silenced. */
-export function attentionOf(m: Pick<Stored, "type" | "attention" | "triage" | "parked" | "verification" | "work">): Attention {
-  if (m.type === "cant" || m.type === "escalate" || m.parked || m.work === "interrupted" || ["escalate", "unavailable"].includes(m.triage?.action ?? "") || ["failed", "unavailable"].includes(m.verification?.status ?? "")) return "now";
-  if (["ack", "reaction", "activity", "cancel"].includes(m.type)) return "none";
+export function attentionOf(m: Pick<Stored, "type" | "attention" | "triage" | "parked" | "verification" | "work" | "withheld">): Attention {
+  if (m.withheld || m.type === "cant" || m.type === "escalate" || m.parked || m.work === "interrupted" || ["escalate", "unavailable"].includes(m.triage?.action ?? "") || ["failed", "unavailable"].includes(m.verification?.status ?? "")) return "now";
+  if (["ack", "reaction", "activity", "control", "cancel"].includes(m.type)) return "none";
   return m.attention ?? "now";
 }
 
@@ -36,13 +37,15 @@ export function projectTimeline(records: Stored[]): TimelineMessage[] {
   const messages = new Map<string, TimelineMessage>();
   const revisions = new Map<string, number>();
   for (const record of records) {
+    if (record.type === "control") continue;
     if (!validTimestamp(record.ts)) continue;
     if (record.type !== "activity") {
       const observed = messages.get(record.id);
       const matches = observed?.from === record.from && observed.to === record.to && observed.thread === record.thread;
       const triage = record.triage ?? (matches ? observed.triage : undefined);
       const steering = record.steering ?? (matches ? observed.steering : undefined);
-      messages.set(record.id, { ...record, ...(triage ? {triage} : {}), ...(steering ? {steering} : {}) });
+      const withheld = record.withheld ?? (matches ? observed.withheld : undefined);
+      messages.set(record.id, { ...record, ...(withheld ? {withheld} : {}), ...(triage ? {triage} : {}), ...(steering ? {steering} : {}) });
       continue;
     }
     try {
@@ -57,8 +60,9 @@ export function projectTimeline(records: Stored[]): TimelineMessage[] {
       revisions.set(revisionKey, updatedAt);
       const triage = record.from === message.to ? message.triage : existing?.triage;
       const steering = record.from === message.to ? message.steering ?? existing?.steering : existing?.steering;
+      const withheld = record.from === message.to ? message.withheld ?? existing?.withheld : existing?.withheld;
       const attention = record.from === message.from ? message.attention : existing?.attention;
-      const decisions = { ...(triage ? {triage} : {}), ...(steering ? {steering} : {}) };
+      const decisions = { ...(withheld ? {withheld} : {}), ...(triage ? {triage} : {}), ...(steering ? {steering} : {}) };
       if (existing && !existing.observedBy) {
         if (record.from === existing.to) messages.set(message.id, { ...existing, ...decisions });
         continue;
@@ -67,7 +71,7 @@ export function projectTimeline(records: Stored[]): TimelineMessage[] {
         messages.set(message.id, { ...existing, ...decisions, attention });
         continue;
       }
-      messages.set(message.id, { ...message, triage, steering, attention, read: true, receivedAt: existing?.receivedAt ?? record.receivedAt, observedBy: record.from });
+      messages.set(message.id, { ...message, triage, steering, withheld, attention, read: true, receivedAt: existing?.receivedAt ?? record.receivedAt, observedBy: record.from });
     } catch { /* Unknown versions and malformed copies are not conversation messages. */ }
   }
   // Older clients sent the same diagnostic as an owner DM. Fold only exact

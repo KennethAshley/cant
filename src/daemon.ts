@@ -4,10 +4,11 @@ import type { Event } from "nostr-tools/pure";
 import type { Config } from "./config.ts";
 import { Inbox, type Stored } from "./inbox.ts";
 import { pubkeyFromNpub, pubkeyOf, npubOf, secretFromNsec, wrap, unwrap, titleSchema, type Message, type MessageType, type Profile, type Outgoing, type Verification, type Attention } from "./nostr.ts";
-import { triage, steer, scope, verify, attention, route, typesafeAsk, type Ask, type Steering } from "./decide.ts";
+import { triage, steer, scope, verify, attention, route, typesafeAsk, COMMUNICATION_POLICY, type Ask, type Steering } from "./decide.ts";
 import { projectTimeline, attentionOf } from "./activity.ts";
 import { uiHtml, uiCss, uiJs } from "./ui.ts";
 import { KIND_WORKING, WORKING_TTL_MS, wrapWorking, unwrapWorking, type Working } from "./nostr.ts";
+import { parseControl, controlActionSchema, type Control, type ControlAction } from "./nostr.ts";
 
 export interface RelayLike {
   publish(events: Event[]): Promise<void>;
@@ -77,6 +78,7 @@ export class Daemon {
     this.stopped = false;
     if (this.deps.handler) await this.deps.handler.start();
     const box = this.deps.inbox;
+    for (const s of box.all().filter(s => s.to === this.pubkey && s.type === "control" && s.work === "pending")) await this.handleControl(s, true);
     // Old inboxes have no work markers: never infer permission to replay historical tasks.
     const unfinished = box.all().filter(s => s.to === this.pubkey && s.work === "running");
     const interruptedThreads = new Set(unfinished.map(s => s.thread));
@@ -193,8 +195,8 @@ export class Daemon {
   }
 
   private async shareActivity(message: Message | Stored): Promise<void> {
-    if (!this.deps.config.share_activity || !this.owner || this.owner === this.pubkey || message.type === "activity" || message.to === this.owner) return;
-    if (message.from === this.owner && !("triage" in message && message.triage) && !("steering" in message && message.steering)) return;
+    if (!this.deps.config.share_activity || !this.owner || this.owner === this.pubkey || ["activity", "control"].includes(message.type) || message.to === this.owner) return;
+    if (message.from === this.owner && !("triage" in message && message.triage) && !("steering" in message && message.steering) && !("withheld" in message && message.withheld)) return;
     const { wraps, id, message: copy } = wrap(this.secret, this.owner, {
       type: "activity", thread: message.thread,
       text: JSON.stringify({ version: 1, updatedAt: Date.now(), message }),
@@ -231,8 +233,9 @@ export class Daemon {
 
   private async onInbound(m: Message): Promise<void> {
     const previous = this.deps.inbox.all();
-    const s = this.deps.inbox.append(m, m.type === "activity" ? { read: true } :
+    const s = this.deps.inbox.append(m, m.type === "control" ? {read: true, work: "pending"} : m.type === "activity" ? { read: true } :
       ["ask", "answer", "done", "cant", "escalate", "cancel"].includes(m.type) ? {work: "pending"} : {});
+    if (m.type === "control") { await this.handleControl(s); return; }
     if (m.type === "activity") {
       const before = new Map(projectTimeline(previous).map(message => [message.id, message]));
       for (const message of projectTimeline([...previous, s])) {
@@ -284,11 +287,11 @@ export class Daemon {
       await this.escalate(s, `consent needed: ${verdict}. Reply: sidecar allow ${npubOf(m.from)}`);
       return;
     }
-    await this.dispatch(s);
+    if (!this.deps.inbox.isPaused(s.thread)) await this.dispatch(s);
   }
 
   private async dispatch(s: Stored): Promise<void> {
-    if (this.stopped || s.work === "finished" || s.work === "interrupted") return;
+    if (this.stopped || this.deps.inbox.isPaused(s.thread) || s.work === "finished" || s.work === "interrupted") return;
     if (!this.deps.handler) {
       // owner's own sidecar: nothing runs, the inbox is the surface
       this.deps.inbox.setWork(s.id, "finished");
@@ -345,7 +348,7 @@ export class Daemon {
       else if (t.action === "act" || t.action === "ask") await this.run(s, t.action, thread);
       if (!this.stopped) this.deps.inbox.setWork(s.id, "finished");
     } finally {
-      if (!this.stopped && this.cancelled.has(s.thread)) this.deps.inbox.setWork(s.id, "finished");
+      if (!this.stopped && this.cancelled.has(s.thread) && s.work !== "pending") this.deps.inbox.setWork(s.id, "finished");
       this.running.delete(s.thread);
       this.cancelled.delete(s.thread);
       const queue = this.queued.get(s.thread);
@@ -364,6 +367,7 @@ export class Daemon {
     let instruction = mode === "act"
       ? "Respond to the marked message using this conversation as context. Continue unfinished work when a reply supplies a missing detail. Do not repeat finished work. Reply with the result only."
       : "Do not do the task yet. Reply with exactly one clarifying question.";
+    instruction += "\nShared communication policy: " + COMMUNICATION_POLICY;
     let title = thread.find(m => m.title)?.title;
     if (!title) instruction += '\nBefore your reply, add one metadata line: <sidecar-title>A short title</sidecar-title>. Choose a 2–5 word conversation title (maximum 80 characters) based on the topic. Then a blank line and your normal reply. No other wrapper.';
     else instruction += '\nReply in plain text without title metadata.';
@@ -381,23 +385,32 @@ export class Daemon {
     }
     if (this.stopped || this.cancelled.has(s.thread)) return;
     this.deps.inbox.saveSessions(h.sessionIds());
-    if (out.stopReason !== "end_turn") return this.outcome(s, "cant", `stopped: ${out.stopReason}\n${out.text.slice(-2000)}`);
+    if (out.stopReason !== "end_turn") return this.holdReply(s, out.text, `Agent stopped before completing its reply: ${out.stopReason}`);
     const metadata = out.text.match(/^\s*<sidecar-title>([^\r\n]*)<\/sidecar-title>\s*\r?\n([\s\S]+)$/);
     if (metadata && metadata[2].trim()) {
       title ??= titleSchema.safeParse(metadata[1]).data;
       out.text = metadata[2].trim();
     }
-    // A clarifying question blocks progress and always needs attention.
-    if (mode === "ask") { await this.emit(s.from, { text: out.text, type: "answer", thread: s.thread, depth: s.depth + 1, attention: "now", title }, {id: s.id, state: "finished"}); return; }
     let v;
-    try { v = await verify({ ask: s.text, output: out.text, thread }, this.ask); }
+    try { v = await verify({ ask: s.text, output: out.text, thread, clarification: mode === "ask" }, this.ask); }
     catch {
       if (this.stopped || this.cancelled.has(s.thread)) return;
-      return this.outcome(s, "cant", `Jev verification unavailable; result needs review:\n${out.text}`, { status: "unavailable" }, "now", "finished", title);
+      return this.holdReply(s, out.text, "Jev check unavailable; the draft has not been approved.", { status: "unavailable" }, title);
     }
     if (this.stopped || this.cancelled.has(s.thread)) return;
     const verification: Verification = v.p === undefined ? { status: "skipped" } : { status: v.answersAsk ? "passed" : "failed", probability: v.p };
-    await this.outcome(s, v.answersAsk ? "done" : "cant", v.answersAsk ? out.text : `output did not answer the ask (${v.p?.toFixed(2)}):\n${out.text.slice(-2000)}`, verification, v.attention, "finished", title);
+    if (!v.communicationOK || !v.answersAsk) return this.holdReply(s, out.text, !v.communicationOK
+      ? "The reply did not pass the shared communication policy, or exceeded the 20,000-character review limit."
+      : "The reply did not answer the request.", v.p === undefined || v.answersAsk ? undefined : {status: "failed", probability: v.p}, title);
+    // A clarifying question blocks progress and always needs attention.
+    if (mode === "ask") { await this.emit(s.from, { text: out.text, type: "answer", thread: s.thread, depth: s.depth + 1, attention: "now", title }, {id: s.id, state: "finished"}); return; }
+    await this.outcome(s, "done", out.text, verification, v.attention, "finished", title);
+  }
+
+  private async holdReply(s: Stored, text: string, reason: string, verification?: Verification, title?: string): Promise<void> {
+    this.deps.inbox.setWithheld(s.id, {text: text.slice(0, 100_000), reason: reason + (text.length > 100_000 ? " Draft preview truncated to 100,000 characters." : "")});
+    void this.shareActivity(s).catch(() => console.error("held reply owner copy failed"));
+    await this.outcome(s, "cant", "Reply held for owner review. Awaiting new instructions.", verification, "now", "finished", title);
   }
 
   // tools
@@ -417,8 +430,8 @@ export class Daemon {
   inbox(args: { unread_only?: boolean; waiting_on_me?: boolean } = {}): Stored[] {
     const box = this.deps.inbox;
     let items = args.unread_only === false ? box.all() : box.unread();
-    items = items.filter(s => s.to === this.pubkey && s.type !== "activity");
-    if (args.waiting_on_me) items = items.filter((s) => s.parked || s.type === "escalate" || s.work === "interrupted" || s.triage?.action === "unavailable");
+    items = items.filter(s => s.to === this.pubkey && !["activity", "control"].includes(s.type));
+    if (args.waiting_on_me) items = items.filter((s) => s.parked || s.withheld || s.type === "escalate" || s.work === "interrupted" || s.triage?.action === "unavailable");
     box.markRead(items.map((s) => s.id));
     return items;
   }
@@ -446,14 +459,75 @@ export class Daemon {
     return { cancelled };
   }
 
-  private async cancelThread(thread: string): Promise<boolean> {
+  private async cancelThread(thread: string, holdQueue = false): Promise<boolean> {
     const pending = this.running.has(thread);
     if (pending) this.cancelled.add(thread);
     for (const s of this.deps.inbox.thread(thread)) {
+      if (holdQueue && (s.work === "pending" || s.work === "preparing")) { this.deps.inbox.setWork(s.id, "pending"); continue; }
       if (s.work === "pending" || s.work === "preparing" || s.work === "running") this.deps.inbox.setWork(s.id, "finished");
     }
     this.queued.delete(thread);
     return (await this.deps.handler?.cancel(thread)) || pending;
+  }
+
+  private async sendControl(to: string, thread: string, control: Control): Promise<void> {
+    const msg = {type: "control" as const, thread, text: JSON.stringify(control), attention: "none" as const};
+    if (to !== this.pubkey) { await this.emit(to, msg); return; }
+    const stored = this.deps.inbox.append(wrap(this.secret, to, msg).message, {read: true, work: control.kind === "command" ? "pending" : "finished"});
+    if (control.kind === "command") await this.handleControl(stored);
+  }
+
+  private async handleControl(message: Stored, recovering = false): Promise<void> {
+    const command = parseControl(message.text);
+    if (command?.kind !== "command") { this.deps.inbox.setWork(message.id, "finished"); return; }
+    const box = this.deps.inbox, root = box.thread(message.thread)[0];
+    const owner = message.from === this.pubkey || message.from === this.owner;
+    const authorized = owner || (command.action === "stop" && root?.from === message.from);
+    const wasPaused = box.isPaused(message.thread);
+    const paused = command.action === "pause" ? true : command.action === "resume" ? false : wasPaused;
+    const accepted = authorized && command.at <= Date.now() + 60_000 &&
+      box.setThreadControl(message.thread, message.from, command.at, message.id, paused, command.action);
+    if (accepted) {
+      if (command.action !== "resume") await this.cancelThread(message.thread, command.action === "pause");
+      else if (!recovering && wasPaused) {
+        const pending = box.thread(message.thread).filter(s => s.to === this.pubkey && s.work === "pending" && !s.parked);
+        if (this.cancelled.has(message.thread)) this.queued.set(message.thread, pending);
+        else for (const s of pending) void this.admit(s).catch(() => console.error("resumed message failed"));
+      }
+    }
+    box.setWork(message.id, "finished");
+    await this.sendControl(message.from, message.thread, {kind: "receipt", request: message.id, accepted, paused: box.isPaused(message.thread)});
+  }
+
+  async control(args: {thread: string; action: ControlAction}): Promise<{targets: string[]}> {
+    const action = controlActionSchema.parse(args.action);
+    const messages = projectTimeline(this.deps.inbox.all()).filter(m => m.thread === args.thread && m.type !== "reaction");
+    if (!messages.length) throw new Error("unknown thread");
+    const targets = [...new Set(messages.flatMap(m => [m.from, m.to]))].filter(pk => pk !== this.pubkey || !!this.deps.handler);
+    const previous = this.deps.inbox.all().filter(m => m.type === "control" && m.from === this.pubkey && m.thread === args.thread)
+      .map(m => parseControl(m.text)).filter(c => c?.kind === "command");
+    const at = Math.max(Date.now(), ...previous.map(c => c!.at + 1));
+    await Promise.all(targets.map(to => this.sendControl(to, args.thread, {kind: "command", action, at})));
+    return {targets};
+  }
+
+  private controlStates() {
+    const records = this.deps.inbox.all().filter(m => m.type === "control").map(m => ({m, c: parseControl(m.text)}));
+    const latest = new Map<string, typeof records[number]>();
+    for (const record of records) {
+      const {m, c} = record;
+      if (c?.kind !== "command" || m.from !== this.pubkey) continue;
+      const key = m.thread + ":" + m.to, old = latest.get(key);
+      if (!old || old.c?.kind !== "command" || c.at > old.c.at || (c.at === old.c.at && m.id > old.m.id)) latest.set(key, record);
+    }
+    const result: Record<string, {pubkey: string; action: ControlAction; accepted?: boolean; paused?: boolean; delivery?: string}[]> = {};
+    for (const {m, c} of latest.values()) {
+      if (c?.kind !== "command") continue;
+      const receipt = records.find(r => r.m.from === m.to && r.m.to === this.pubkey && r.m.thread === m.thread && r.c?.kind === "receipt" && r.c.request === m.id)?.c;
+      (result[m.thread] ??= []).push({pubkey: m.to, action: c.action, delivery: m.delivery,
+        ...(receipt?.kind === "receipt" ? {accepted: receipt.accepted, paused: receipt.paused} : {})});
+    }
+    return result;
   }
 
   async findAgents(query?: string): Promise<Profile[]> {
@@ -474,6 +548,8 @@ export class Daemon {
       messages: projectTimeline(this.deps.inbox.all()).map(m => ({...m, attention: attentionOf(m)})), relays: this.deps.config.relays,
       sharing: { enabled: !!this.deps.config.share_activity, owner: this.deps.config.owner },
       working: [...this.working.values()].filter(status => status.active),
+      controls: this.controlStates(),
+      paused: [...new Set(this.deps.inbox.all().map(m => m.thread))].filter(thread => this.deps.inbox.isPaused(thread)),
     };
   }
 
@@ -492,7 +568,7 @@ export class Daemon {
 
 // localhost HTTP endpoint
 
-export type Rpc = "send" | "inbox" | "reply" | "allow" | "cancel" | "find_agents" | "whoami" | "timeline" | "react";
+export type Rpc = "send" | "inbox" | "reply" | "allow" | "cancel" | "control" | "find_agents" | "whoami" | "timeline" | "react";
 
 export function serveHttp(daemon: Daemon, port: number, ready = () => true): Promise<() => void> {
   const server = http.createServer(async (req, res) => {
@@ -527,6 +603,7 @@ export function serveHttp(daemon: Daemon, port: number, ready = () => true): Pro
         reply: () => daemon.reply(args as never),
         allow: () => daemon.allow(String(args.npub)),
         cancel: () => daemon.cancel(String(args.thread)),
+        control: () => daemon.control(args as never),
         find_agents: () => daemon.findAgents(args.query as string | undefined),
         whoami: () => daemon.whoami(),
         timeline: () => daemon.timeline(),

@@ -48,7 +48,7 @@ const score = (s: number): Answer => ({ type: "score", score: s, confidence: 1, 
 const noul = (p: number): Answer => ({ type: "noul", noul: p });
 const actAsk: Ask = async (_s, q): Promise<Record<string, Answer> | null> => {
   if ("action" in q) return { action: choice("act", 0.95), urgency: score(1), in_scope: noul(0.9), contradiction: noul(0) };
-  if ("answers_ask" in q) return { answers_ask: noul(0.9) };
+  if ("answers_ask" in q) return { answers_ask: noul(0.9), communication_ok: noul(.95) };
   if ("in_scope" in q) return { in_scope: noul(0.8) };
   if ("route" in q) return { route: choice("none", 0.9) };
   return null;
@@ -69,6 +69,143 @@ function setup(over: Partial<Config> = {}, ask: Ask = actAsk) {
 }
 
 const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+
+test("Pause during Jev preserves the unstarted turn, even when Resume arrives before Jev returns", async () => {
+  const judge = deferred(), judging = deferred(); let first = true;
+  const {d, box, relay, handler, me, friend} = setup({}, async (s, q) => {
+    if ("action" in q && first) { first = false; judging.resolve(); await judge.promise; }
+    return actAsk(s, q);
+  });
+  const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "Unstarted work"});
+  try {
+    await d.start(); await relay.publish(request.wraps); await judging.promise;
+    await d.control({thread: request.id, action: "pause"});
+    assert.equal(box.get(request.id)?.work, "pending");
+    await d.control({thread: request.id, action: "resume"});
+    judge.resolve(); await tick(120);
+    assert.equal(handler.prompts.length, 1);
+    assert.equal(box.get(request.id)?.work, "finished");
+  } finally { judge.resolve(); d.stop(); }
+});
+
+test("an unprocessed Stop is recovered before pending work can start", async () => {
+  const {d, box, handler, me, friend, owner} = setup();
+  const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "Do not restart"});
+  box.append(request.message, {work: "pending"});
+  box.append(wrap(owner, pubkeyOf(me), {type: "control", thread: request.id,
+    text: JSON.stringify({kind: "command", action: "stop", at: Date.now()})}).message, {work: "pending"});
+  try {
+    await d.start(); await tick();
+    assert.equal(handler.prompts.length, 0);
+    assert.equal(box.get(request.id)?.work, "finished");
+    assert.ok(d.inbox({unread_only: false}).every(m => m.type !== "control"));
+  } finally { d.stop(); }
+});
+
+test("shared concise policy holds unsuitable replies for the owner without leaking the draft to the peer", async () => {
+  for (const mode of ["act", "ask"] as const) {
+    let checks = 0;
+    const {d, box, relay, handler, me, friend, owner} = setup({share_activity: true}, async (s, q) => {
+      if ("action" in q) return {...await actAsk(s, q), action: choice(mode, .95)};
+      if ("answers_ask" in q) { checks++; return {answers_ask: noul(.99), communication_ok: noul(.1)}; }
+      return actAsk(s, q);
+    });
+    handler.reply = "PRIVATE HELD DRAFT: irrelevant rambling";
+    const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "One useful sentence please"});
+    try {
+      await d.start(); await relay.publish(request.wraps); await tick(150);
+      assert.equal(checks, 1, "policy shares the completion check, including clarification turns");
+      assert.match(handler.prompts[0].text, /answer or result first/i);
+      assert.ok(!relay.received(friend).some(m => m.text.includes("PRIVATE HELD DRAFT")));
+      assert.match(relay.received(friend).find(m => m.type === "cant")?.text ?? "", /held for owner review/i);
+      assert.equal(box.get(request.id)?.withheld?.text, handler.reply);
+      const copies = relay.received(owner).filter(m => m.type === "activity").map(m => JSON.parse(m.text).message);
+      assert.ok(copies.some(m => m.withheld?.text === handler.reply));
+    } finally { d.stop(); }
+  }
+});
+
+test("pause holds queued and new work through restart; resume never replays the cancelled turn", async () => {
+  const {d, relay, handler, me, friend, owner, box, config, dir} = setup();
+  const turn = deferred(), started = deferred();
+  handler.prompt = async (thread, text) => { handler.prompts.push({thread, text}); started.resolve(); await turn.promise; return {text: "obsolete", stopReason: "end_turn"}; };
+  const command = async (action: string, at = Date.now(), secret = owner) => {
+    await relay.publish(wrap(secret, pubkeyOf(me), {type: "control", thread: request.id, text: JSON.stringify({kind: "command", action, at})}).wraps); await tick(60);
+  };
+  const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "First task"});
+  await d.start();
+  try {
+    await relay.publish(request.wraps); await started.promise;
+    const queued = wrap(friend, pubkeyOf(me), {type: "ask", text: "Queued task", thread: request.id});
+    await relay.publish(queued.wraps); await tick();
+    await command("pause");
+    assert.equal(typeof box.isPaused, "function");
+    assert.equal(box.isPaused(request.id), true);
+    turn.resolve(); await tick();
+    assert.equal(handler.prompts.length, 1);
+    assert.equal(box.get(queued.id)?.work, "pending");
+    assert.ok(!relay.received(friend).some(m => m.text === "obsolete"));
+  } finally { turn.resolve(); d.stop(); }
+  const nextRelay = new FakeRelay(), nextHandler = new FakeHandler(), nextBox = new Inbox(dir);
+  const next = new Daemon({config, relay: nextRelay, handler: nextHandler, inbox: nextBox, ask: actAsk, notify: () => {}});
+  try {
+    await next.start(); await tick();
+    assert.equal(nextHandler.prompts.length, 0);
+    await nextRelay.publish(wrap(friend, pubkeyOf(me), {type: "ask", text: "New held task", thread: request.id}).wraps); await tick();
+    assert.equal(nextHandler.prompts.length, 0);
+    await nextRelay.publish(wrap(owner, pubkeyOf(me), {type: "control", thread: request.id, text: JSON.stringify({kind: "command", action: "resume", at: Date.now()})}).wraps); await tick(150);
+    assert.equal(nextBox.isPaused(request.id), false);
+    assert.equal(nextHandler.prompts.length, 2);
+    assert.match(nextHandler.prompts[0].text, /respond to this message\]\nQueued task/);
+    assert.match(nextHandler.prompts[1].text, /respond to this message\]\nNew held task/);
+  } finally { next.stop(); }
+});
+
+test("owner controls have receipts; strangers and stale commands cannot resume a paused thread", async () => {
+  const {d, relay, me, friend, owner, box} = setup({share_activity: true});
+  const viewer = new Daemon({config: defaultConfig({nsec: nip19.nsecEncode(owner), name: "owner"}), relay,
+    inbox: new Inbox(fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-control-"))), notify: () => {}});
+  const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "Original task"});
+  await d.start(); await viewer.start();
+  try {
+    await relay.publish(request.wraps); await tick(100);
+    assert.equal(typeof viewer.control, "function");
+    await viewer.control({thread: request.id, action: "pause"}); await tick(100);
+    assert.equal(box.isPaused(request.id), true);
+    const state = viewer.timeline().controls[request.id].find(s => s.pubkey === pubkeyOf(me));
+    assert.equal(state?.accepted, true);
+    assert.equal(state?.paused, true);
+    assert.ok(viewer.timeline().messages.every(m => m.type !== "control"), "controls stay out of chat and Jev");
+    const send = async (secret: Uint8Array, action: string, at: number) => {
+      await relay.publish(wrap(secret, pubkeyOf(me), {type: "control", thread: request.id, text: JSON.stringify({kind: "command", action, at})}).wraps); await tick();
+    };
+    await send(friend, "resume", Date.now());
+    assert.equal(box.isPaused(request.id), true, "only owner can change pause state");
+    await send(owner, "resume", 1);
+    assert.equal(box.isPaused(request.id), true, "delayed controls cannot override newer state");
+    await viewer.control({thread: request.id, action: "resume"}); await tick(100);
+    assert.equal(box.isPaused(request.id), false);
+  } finally { d.stop(); viewer.stop(); }
+});
+
+test("Stop clears current and queued work without permanently pausing the thread", async () => {
+  const {d, relay, handler, me, friend, box} = setup();
+  const turn = deferred(), started = deferred();
+  handler.prompt = async (thread, text) => { handler.prompts.push({thread, text}); started.resolve(); await turn.promise; return {text: "obsolete", stopReason: "end_turn"}; };
+  const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "First task"});
+  try {
+    await d.start(); await relay.publish(request.wraps); await started.promise;
+    const queued = wrap(friend, pubkeyOf(me), {type: "ask", text: "Queued task", thread: request.id});
+    await relay.publish(queued.wraps); await tick();
+    assert.equal(typeof d.control, "function");
+    await d.control({thread: request.id, action: "stop"});
+    turn.resolve(); await tick();
+    assert.equal(handler.prompts.length, 1);
+    assert.equal(box.get(queued.id)?.work, "finished");
+    assert.equal(box.isPaused(request.id), false);
+    assert.ok(!relay.received(friend).some(m => m.text === "obsolete"));
+  } finally { turn.resolve(); d.stop(); }
+});
 
 test("one agent turn titles the encrypted conversation, survives restart, and keeps metadata out of Jev", async () => {
   const outputs: unknown[] = [];
@@ -109,7 +246,7 @@ test("clarifications can supply titles and optional formatting never loses a pla
     ["Which neighborhood?", "Which neighborhood?", undefined],
     ["<sidecar-title>" + "x".repeat(81) + "</sidecar-title>\nWhich neighborhood?", "Which neighborhood?", undefined],
   ]) {
-    const {d, relay, handler, friend, me} = setup({}, async () => ({action: choice("ask", .99), urgency: score(1), in_scope: noul(1), contradiction: noul(0)}));
+    const {d, relay, handler, friend, me} = setup({}, async (s, q) => "action" in q ? {action: choice("ask", .99), urgency: score(1), in_scope: noul(1), contradiction: noul(0)} : actAsk(s, q));
     handler.reply = reply!;
     try {
       await d.start();
@@ -496,7 +633,7 @@ test("restart preserves a correction's place ahead of older queued messages", as
 test("attention labels reach the peer and owner without suppressing agent work", async () => {
   for (const level of ["now", "later", "none"] as const) {
     const {d, relay, me, friend, owner, notes, handler} = setup({}, async (s, q) => {
-      if ("answers_ask" in q) return {answers_ask: noul(0.9), needs_owner: noul(level === "none" ? 0.1 : 0.9), attention_urgency: choice(level, 0.9)};
+      if ("answers_ask" in q) return {answers_ask: noul(0.9), communication_ok: noul(.95), needs_owner: noul(level === "none" ? 0.1 : 0.9), attention_urgency: choice(level, 0.9)};
       return actAsk(s, q);
     });
     try {
@@ -623,16 +760,17 @@ test("owner request still runs when no judge is configured", async () => {
   d.stop();
 });
 
-test("verify false turns done into cant with output attached", async () => {
-  const ask: Ask = async (s, q) => ("answers_ask" in q ? { answers_ask: noul(0.1) } : actAsk(s, q));
-  const { d, relay, handler, me, friend } = setup({}, ask);
+test("incomplete replies are held locally instead of forwarding the draft", async () => {
+  const ask: Ask = async (s, q) => ("answers_ask" in q ? { answers_ask: noul(0.1), communication_ok: noul(.95) } : actAsk(s, q));
+  const { d, relay, handler, me, friend, box } = setup({}, ask);
   handler.reply = "I could not";
   await d.start();
   await relay.publish(wrap(friend, pubkeyOf(me), { text: "x", type: "ask" }).wraps);
   await tick();
   const last = relay.received(friend).at(-1)!;
   assert.equal(last.type, "cant");
-  assert.match(last.text, /I could not/);
+  assert.doesNotMatch(last.text, /I could not/);
+  assert.ok(box.all().some(m => m.withheld?.text === "I could not"));
   d.stop();
 });
 

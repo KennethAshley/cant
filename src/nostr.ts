@@ -14,7 +14,18 @@ export const WORKING_TTL_MS = 8000;
 export const DM_FUZZ_WINDOW_S = 2 * 86_400;
 
 export const MESSAGE_TYPES = ["ask", "ack", "answer", "done", "cant", "cancel", "escalate"] as const;
-export type MessageType = (typeof MESSAGE_TYPES)[number] | "reaction" | "activity";
+export type MessageType = (typeof MESSAGE_TYPES)[number] | "reaction" | "activity" | "control";
+export const controlActionSchema = z.enum(["stop", "pause", "resume"]);
+export type ControlAction = z.infer<typeof controlActionSchema>;
+const controlSchema = z.discriminatedUnion("kind", [
+  z.object({kind: z.literal("command"), action: controlActionSchema, at: z.number().int().nonnegative().safe()}),
+  z.object({kind: z.literal("receipt"), request: z.string().regex(/^[0-9a-f]{64}$/), accepted: z.boolean(), paused: z.boolean()}),
+]);
+export type Control = z.infer<typeof controlSchema>;
+export function parseControl(text: string): Control | undefined {
+  if (text.length > 512) return;
+  try { return controlSchema.parse(JSON.parse(text)); } catch { return undefined; }
+}
 export const verificationSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("passed"), probability: z.number().min(0).max(1) }),
   z.object({ status: z.literal("failed"), probability: z.number().min(0).max(1) }),
@@ -151,7 +162,8 @@ export function unwrap(event: Event, secret: Uint8Array): Message | undefined {
   const tag = (k: string) => rumor.tags.find((t) => t[0] === k)?.[1];
   const type = rumor.kind === 7 ? "reaction" : tag("type");
   const to = tag("p");
-  if (!to || ![...MESSAGE_TYPES, "reaction", "activity"].includes(type ?? "")) return undefined;
+  if (!to || ![...MESSAGE_TYPES, "reaction", "activity", "control"].includes(type ?? "")) return undefined;
+  if (type === "control" && !parseControl(rumor.content)) return undefined;
   const depth = Number(tag("depth") ?? 0);
   if (!Number.isSafeInteger(depth) || depth < 0) return undefined;
   const reactionTo = type === "reaction" ? tag("e") : undefined;

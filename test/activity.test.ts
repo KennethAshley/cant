@@ -4,6 +4,19 @@ import { projectTimeline, attentionOf } from "../src/activity.ts";
 import type { Stored } from "../src/inbox.ts";
 import { npubOf } from "../src/nostr.ts";
 
+test("only the receiver can attach a held draft, regardless of owner-copy delivery order", () => {
+  const message: Stored = {id: "d".repeat(64), thread: "d".repeat(64), from: "a".repeat(64), to: "b".repeat(64), type: "ask", text: "A short answer", depth: 0, ts: 1, read: true, receivedAt: 1};
+  const copy = (from: string, text: string): Stored => ({...message, id: from, from, to: "c".repeat(64), type: "activity",
+    text: JSON.stringify({version: 1, updatedAt: 1, message: {...message, withheld: {text, reason: "Policy"}}})});
+  const author = copy(message.from, "forged"), receiver = copy(message.to, "real draft");
+  assert.equal(projectTimeline([author])[0].withheld, undefined);
+  for (const records of [[author, receiver], [receiver, author], [message, receiver], [receiver, message]]) {
+    const projected = projectTimeline(records)[0];
+    assert.equal(projected.withheld?.text, "real draft");
+    assert.equal(attentionOf(projected), "now");
+  }
+});
+
 test("encrypted owner copies preserve the author's title through receiver updates", () => {
   const message = {id: "d".repeat(64), thread: "d".repeat(64), from: "a".repeat(64), to: "b".repeat(64), type: "done", text: "Visit Mount Royal.", depth: 0, ts: 1};
   const copy = (from: string, title: string): Stored => ({...message, id: from, from, to: "c".repeat(64), type: "activity", read: true, receivedAt: 1,

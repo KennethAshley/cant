@@ -85,7 +85,7 @@ async function up(): Promise<void> {
   console.log(`conversations: http://localhost:${config.port}`);
 }
 
-async function tool(method: "inbox" | "reply" | "allow" | "cancel"): Promise<void> {
+async function tool(method: "inbox" | "reply" | "allow" | "cancel" | "stop" | "pause" | "resume"): Promise<void> {
   const config = loadConfig();
   await ensureDaemon(config);
   const { port } = config;
@@ -99,18 +99,21 @@ async function tool(method: "inbox" | "reply" | "allow" | "cancel"): Promise<voi
   if (method === "allow") args.npub = rest[0];
   if (method === "cancel") args.thread = rest[0];
   if (method === "inbox") { args.waiting_on_me = rest.includes("--waiting"); args.unread_only = !rest.includes("--all"); }
-  console.log(JSON.stringify(await rpc(port, method, args), null, 2));
+  const control = ["stop", "pause", "resume"].includes(method);
+  if (control) { args.thread = rest[0]; args.action = method; }
+  console.log(JSON.stringify(await rpc(port, control ? "control" : method as "inbox" | "reply" | "allow" | "cancel", args), null, 2));
 }
 
 const commands: Record<string, () => Promise<void>> = {
   init, up, mcp: serveMcp,
+  stop: () => tool("stop"), pause: () => tool("pause"), resume: () => tool("resume"),
   whoami: async () => { const c = loadConfig(); console.log(npubOf(pubkeyOf(secretFromNsec(c.nsec)))); },
   inbox: () => tool("inbox"), reply: () => tool("reply"), allow: () => tool("allow"), cancel: () => tool("cancel"),
 };
 
 const run = cmd === undefined && process.stdin.isTTY && process.stdout.isTTY ? () => picker(() => ensureDaemon()) : commands[cmd ?? ""];
 if (!run) {
-  console.log(`usage: ${NAME} [--agent name] <init [--yes] [--owner] [--name n] [--nsec k] [--owner-npub npub] [--capabilities a,b] [--handler cmd] [--port n] | up [--foreground] | mcp | whoami | inbox [--waiting] [--all] | reply <thread> <text> [--type t] | allow <npub> | cancel <thread>>\nRun without a command in a terminal to choose an agent.`);
+  console.log(`usage: ${NAME} [--agent name] <init [--yes] [--owner] [--name n] [--nsec k] [--owner-npub npub] [--capabilities a,b] [--handler cmd] [--port n] | up [--foreground] | mcp | whoami | inbox [--waiting] [--all] | reply <thread> <text> [--type t] | allow <npub> | cancel <thread> | stop <thread> | pause <thread> | resume <thread>>\nRun without a command in a terminal to choose an agent.`);
   process.exit(cmd ? 1 : 0);
 }
 run().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });

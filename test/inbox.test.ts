@@ -10,6 +10,30 @@ const dir = () => fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-inbox-"));
 const m = (id: string, extra: Partial<Message> = {}): Message =>
   ({ id, thread: extra.thread ?? id, from: "a", to: "b", type: "ask", text: id, depth: 0, ts: 1, ...extra });
 
+test("thread pause persists and older controls cannot undo a newer command", () => {
+  const d = dir(), box = new Inbox(d);
+  assert.equal(typeof box.setThreadControl, "function");
+  assert.equal(box.setThreadControl("thread", "owner", 10, "a", true), true);
+  assert.equal(new Inbox(d).isPaused("thread"), true);
+  assert.equal(box.setThreadControl("thread", "owner", 12, "b", false), true);
+  assert.equal(box.setThreadControl("thread", "owner", 11, "c", true), false);
+  assert.equal(new Inbox(d).isPaused("thread"), false);
+});
+
+test("control state and work cancellation persist in the same log record", () => {
+  const d = dir(), box = new Inbox(d);
+  box.append(m("active", {thread: "thread"}), {work: "running"});
+  box.append(m("queued", {thread: "thread"}), {work: "pending"});
+  box.setThreadControl("thread", "owner", 1, "pause", true, "pause");
+  const paused = new Inbox(d);
+  assert.equal(paused.get("active")?.work, "finished");
+  assert.equal(paused.get("queued")?.work, "pending");
+  box.setThreadControl("thread", "owner", 2, "stop", true, "stop");
+  const stopped = new Inbox(d);
+  assert.equal(stopped.isPaused("thread"), true);
+  assert.equal(stopped.get("queued")?.work, "finished");
+});
+
 test("append, unread, markRead persist across instances", () => {
   const d = dir();
   const box = new Inbox(d);
