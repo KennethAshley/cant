@@ -2,9 +2,10 @@ import { finalizeEvent, generateSecretKey, getPublicKey, validateEvent, verifyEv
 import * as nip19 from "nostr-tools/nip19";
 import * as nip44 from "nostr-tools/nip44";
 import * as nip59 from "nostr-tools/nip59";
-import { NAME } from "./config.ts";
 import { z } from "zod";
 
+// Keep profile discovery compatible with existing Sidecar peers.
+const PROFILE_TAG = "sidecar";
 export const KIND_PROFILE = 0;
 export const KIND_DM = 14;
 export const KIND_GIFT_WRAP = 1059;
@@ -139,7 +140,7 @@ const workingSchema = z.object({
 });
 export type Working = z.infer<typeof workingSchema> & { from: string };
 
-/** Sidecar's private kind-20002 envelope: NIP-44 + signed seal, never a stored DM. */
+/** Cant's private kind-20002 envelope: NIP-44 + signed seal, never a stored DM. */
 export function wrapWorking(secret: Uint8Array, to: string, status: Omit<Working, "from">): Event {
   const rumor = nip59.createRumor({kind: KIND_WORKING, tags: [["p", to]], content: JSON.stringify(workingSchema.parse(status))}, secret);
   const seal = nip59.createSeal(rumor, secret, to);
@@ -200,7 +201,7 @@ export function profileEvent(secret: Uint8Array, p: Omit<Profile, "pubkey">): Ev
     {
       kind: KIND_PROFILE,
       created_at: Math.floor(Date.now() / 1000),
-      tags: [["t", NAME]],
+      tags: [["t", PROFILE_TAG]],
       content: JSON.stringify({ name: p.name, about: p.about, capabilities: p.capabilities }),
     },
     secret,
@@ -300,7 +301,7 @@ export class Relay {
   }
 
   async findAgents(): Promise<Profile[]> {
-    const events = await this.pool.querySync(this.urls, { kinds: [KIND_PROFILE], "#t": [NAME] }, { maxWait: 3000 });
+    const events = await this.pool.querySync(this.urls, { kinds: [KIND_PROFILE], "#t": [PROFILE_TAG] }, { maxWait: 3000 });
     const latest = new Map<string, Event>();
     for (const ev of events) {
       const prev = latest.get(ev.pubkey);

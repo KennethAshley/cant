@@ -61,8 +61,8 @@ export async function agentStatus(config: Config): Promise<"running" | "starting
 }
 
 export async function launchPi(config: Config): Promise<void> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("Interactive Pi needs a terminal. Run the Sidecar picker in your terminal.");
-  if (await agentStatus(config) !== "stopped") throw new Error("This Sidecar identity is already running. Use its existing Pi terminal, or connect another agent.");
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("Interactive Pi needs a terminal. Run the Cant picker in your terminal.");
+  if (await agentStatus(config) !== "stopped") throw new Error("This Cant identity is already running. Use its existing Pi terminal, or connect another agent.");
   await new PiHandler([config.handler], {permissions: config.acp.permissions, timeoutMs: config.timeoutMs, cwd: config.cwd}).start();
   const extension = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./pi-extension.ts" : "./pi-extension.js", import.meta.url));
   const args = ["--extension", extension];
@@ -70,7 +70,7 @@ export async function launchPi(config: Config): Promise<void> {
     const session = fs.readFileSync(path.join(home(), "pi-session"), "utf8").trim();
     if (session && fs.existsSync(session)) args.push("--session", session);
   } catch { /* First launch starts a normal saved Pi session. */ }
-  console.log(`\n  Opening Pi · ${plain(config.name)}\n  Identity  ${npubOf(pubkeyOf(secretFromNsec(config.nsec)))}\n  Viewer    http://localhost:${config.port}\n  Sidecar stays connected while this Pi session is open.\n`);
+  console.log(`\n  Opening Pi · ${plain(config.name)}\n  Identity  ${npubOf(pubkeyOf(secretFromNsec(config.nsec)))}\n  Viewer    http://localhost:${config.port}\n  Cant stays connected while this Pi session is open.\n`);
   await new Promise<void>((resolve, reject) => {
     const child = spawn(config.handler, args, {cwd: config.cwd, stdio: "inherit", env: {...process.env, SIDECAR_HOME: path.resolve(baseHome())}});
     // Pi owns Ctrl-C while attached to the terminal; the launcher must not exit first.
@@ -126,7 +126,7 @@ export async function choose(title: string, labels: string[]): Promise<number | 
 }
 
 export async function picker(start: () => Promise<void>): Promise<void> {
-  console.log(ochre("\n  fez / sidecar"));
+  console.log(ochre("\n  fez / cant"));
   const saved = savedAgents();
   let selected: typeof saved[number] | undefined;
   if (process.env.SIDECAR_AGENT !== undefined) selected = saved.find(a => a.id === process.env.SIDECAR_AGENT);
@@ -152,7 +152,7 @@ export async function picker(start: () => Promise<void>): Promise<void> {
       while (true) {
         const id = (await rl.question(`  Name [${suggested}]: `)).trim() || suggested;
         try {
-          if (id === "default") throw new Error("default is reserved for the original Sidecar");
+          if (id === "default") throw new Error("default is reserved for the original Cant");
           home(id);
           if (fs.existsSync(home(id))) throw new Error("That agent already exists; choose another name");
           process.env.SIDECAR_AGENT = id;

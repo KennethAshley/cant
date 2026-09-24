@@ -1,5 +1,5 @@
 // Color presets adapted from Fez’s @fezchat/themes collection. See README for palette credits.
-// Dim text and accents are adjusted for readable contrast in Sidecar’s smaller chat type.
+// Dim text and accents are adjusted for readable contrast in Cant’s smaller chat type.
 type Palette = [base: string, panel: string, raised: string, line: string, ink: string, soft: string, muted: string, accent: string, secondary: string, tertiary: string, code: string, error: string];
 export const themes: Record<string, { name: string; dark: Palette; light: Palette }> = {
   "gruvbox": { name: "Gruvbox",

@@ -86,7 +86,7 @@ export class Daemon {
       if ((s.work === "pending" || s.work === "preparing") && interruptedThreads.has(s.thread)) box.setWork(s.id, "interrupted");
     }
     for (const s of unfinished) {
-      void this.outcome(s, "cant", "This task was interrupted by a Sidecar restart. Work may be partially complete. Review it before sending a new request; queued follow-ups in this thread were held for review.", undefined, "now", "interrupted").catch(e => console.error("recovery notice failed", e));
+      void this.outcome(s, "cant", "This task was interrupted by a Cant restart. Work may be partially complete. Review it before sending a new request; queued follow-ups in this thread were held for review.", undefined, "now", "interrupted").catch(e => console.error("recovery notice failed", e));
     }
     const pending = box.all().filter(s => s.to === this.pubkey && (s.work === "pending" || s.work === "preparing") && !s.parked);
     // Preserve the reserved turn (including a prioritized correction) ahead of its queue.
@@ -285,7 +285,7 @@ export class Daemon {
       await this.shareActivity(s);
       if (s.review) return;
       const verdict = inScope === undefined ? "scope unknown, Jev unavailable" : `in scope ${inScope.toFixed(2)}`;
-      await this.escalate(s, `consent needed: ${verdict}. Review this request in the receiving agent's Sidecar or its owner's webapp.`);
+      await this.escalate(s, `consent needed: ${verdict}. Review this request in the receiving agent's Cant or its owner's webapp.`);
       return;
     }
     if (!this.deps.inbox.isPaused(s.thread)) await this.dispatch(s);

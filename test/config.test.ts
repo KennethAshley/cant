@@ -30,7 +30,7 @@ test("save then load round-trips and file is mode 600", () => {
 
 test("loadConfig throws a readable error when missing", () => {
   fs.rmSync(path.join(home(), "config.json"));
-  assert.throws(() => loadConfig(), /sidecar init/);
+  assert.throws(() => loadConfig(), /cant init/);
 });
 
 test("named agents keep their keys and inboxes separate from the legacy default", () => {
@@ -62,7 +62,7 @@ test("an agent name cannot escape its configuration directory", () => {
 test("macOS notification text reaches AppleScript literally, including quotes and shell syntax", {skip: process.platform !== "darwin"}, () => {
   const command = defaultConfig({nsec: "test", name: "test"}).notify;
   // Evaluate the real configured body expression without showing a test banner.
-  const readBody = command.replace("display notification", "return").replace(' with title "sidecar"', "");
+  const readBody = command.replace("display notification", "return").replace(' with title "cant"', "");
   const message = 'Ken says "bonjour"\n$MSG $(echo should-not-run) `whoami` Montréal';
   const result = execFileSync("/bin/sh", ["-c", readBody], {encoding: "utf8", env: {...process.env, MSG: message}});
   assert.equal(result.trimEnd(), message);
@@ -76,4 +76,26 @@ test("loading the legacy Mac notification default fixes its literal MSG bug and 
     saveConfig(defaultConfig({nsec: "test", name: "test", notify}));
     assert.equal(loadConfig().notify, notify);
   }
+});
+
+test("Cant reuses a Sidecar identity and updates only its built-in notification hook", () => {
+  const notify = `osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "sidecar"' -e 'end run' -- "$MSG"`;
+  const existing = defaultConfig({nsec: "existing-key", name: "existing-agent", notify});
+  saveConfig(existing);
+  const loaded = loadConfig();
+  assert.deepEqual({...loaded, notify}, existing);
+  assert.match(loaded.notify, /with title "cant"/);
+});
+
+test("the Cant CLI finds an existing default Sidecar identity without moving it", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cant-legacy-home-"));
+  const legacy = path.join(root, ".sidecar");
+  fs.mkdirSync(legacy);
+  fs.writeFileSync(path.join(legacy, "config.json"), JSON.stringify(defaultConfig({nsec: "legacy-key", name: "legacy"})));
+  const env: NodeJS.ProcessEnv = {...process.env, HOME: root};
+  delete env.SIDECAR_HOME;
+  delete env.SIDECAR_AGENT;
+  const result = execFileSync(process.execPath, ["--input-type=module", "-e", `import {loadConfig} from './src/config.ts'; console.log(loadConfig().nsec)`], {env, encoding: "utf8"});
+  assert.equal(result.trim(), "legacy-key");
+  assert.equal(fs.existsSync(path.join(root, ".cant")), false);
 });

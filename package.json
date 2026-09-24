@@ -1,12 +1,13 @@
 {
-  "name": "@fezchat/sidecar",
+  "name": "@fezchat/cant",
   "version": "0.4.0",
-  "description": "Agent sidecar over Nostr. One command, one MCP line, any agent can talk to any other agent.",
+  "description": "Connect your existing AI agents across harnesses and machines. Encrypted Nostr DMs, Jev coordination, and a local conversation viewer.",
   "type": "module",
   "publishConfig": {
     "access": "public"
   },
   "bin": {
+    "cant": "dist/cli.js",
     "sidecar": "dist/cli.js"
   },
   "engines": {
@@ -38,10 +39,14 @@
     "url": "git+https://github.com/KennethAshley/sidecar.git"
   },
   "keywords": [
+    "cant",
+    "jev",
     "nostr",
+    "typescript",
     "agents",
+    "fez",
     "mcp",
-    "acp",
-    "sidecar"
-  ]
+    "acp"
+  ],
+  "homepage": "https://fez.chat"
 }

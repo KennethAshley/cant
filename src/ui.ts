@@ -15,11 +15,11 @@ export function threadTitle(messages: Pick<Message, "thread" | "type" | "text" |
 
 export const uiHtml = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark light"><title>Sidecar · Conversations</title><link rel="icon" href="data:,">
+<meta name="color-scheme" content="dark light"><title>Cant · Conversations</title><link rel="icon" href="data:,">
 <script src="/ui.js"></script><link rel="stylesheet" href="/ui.css"></head>
 <body><div class="workspace">
 <aside class="sidebar" aria-label="Conversations">
-  <header class="brand"><span class="brand-mark" aria-hidden="true">&gt;_</span><span>sidecar</span><span class="local-label">local</span></header>
+  <header class="brand"><span class="brand-mark" aria-hidden="true">&gt;_</span><span>cant</span><span class="local-label">local</span></header>
   <div class="identity"><div id="self-avatar" class="avatar">S</div><div><strong id="self-name">Connecting…</strong><span id="connection" role="status">Opening your inbox</span></div></div>
   <div class="sidebar-heading"><h1>Conversations</h1><span id="thread-count" class="count">0</span></div>
   <label class="attention-filter">Attention <select id="attention-filter"><option value="now">Now</option><option value="later">Later</option><option value="all" selected>All conversations</option></select></label>
@@ -38,9 +38,9 @@ export const uiHtml = `<!doctype html>
 <main id="main" tabindex="-1">
   <header class="conversation-header"><div><h2 id="conversation-title"># conversations</h2><p id="conversation-context">Your local chat log</p></div><div id="thread-controls" hidden><div class="control-buttons"><button id="stop-thread" class="secondary" title="Cancel current and queued work on this conversation">Stop</button><button id="pause-thread" class="secondary" title="Cancel the current turn and hold queued and new messages until resumed">Pause</button><button id="copy-thread" class="secondary" hidden>Copy thread ID</button></div><p id="control-status" role="status" aria-live="polite"></p></div></header>
   <div id="error" role="alert" hidden></div>
-  <div id="timeline" class="timeline"><div class="empty"><div class="empty-mark" aria-hidden="true">#</div><h3>No conversation selected.</h3><p>Your agents’ messages and Jev decisions appear here.</p><p class="empty-hint">Send a message with your agent’s Sidecar tools to start a thread.</p></div></div>
+  <div id="timeline" class="timeline"><div class="empty"><div class="empty-mark" aria-hidden="true">#</div><h3>No conversation selected.</h3><p>Your agents’ messages and Jev decisions appear here.</p><p class="empty-hint">Send a message with your agent’s Cant tools to start a thread.</p></div></div>
   <div id="working" class="working" role="status" aria-live="polite" aria-atomic="true" hidden></div>
-  <footer class="conversation-footer"><span id="view-note">Your messages stay on your Sidecar.</span><span id="updated">Waiting for messages</span></footer>
+  <footer class="conversation-footer"><span id="view-note">Your messages stay on your Cant.</span><span id="updated">Waiting for messages</span></footer>
 </main></div><div id="toast" role="status" hidden></div></body></html>`;
 
 export const uiCss = `
@@ -211,7 +211,7 @@ function renderConversation(messages) {
   renderControls();
   if (!messages) {
     $('conversation-title').textContent = '# conversations'; $('conversation-context').textContent = 'Your local chat log';
-    const empty = el('div','empty'); empty.append(el('div','empty-mark','#'),el('h3','','No conversation selected.'),el('p','','Choose a conversation, or change the attention filter to see more.'),el('p','empty-hint','Send a message with your agent’s Sidecar tools. For an owner view, enable share_activity on your agents.')); container.append(empty); return;
+    const empty = el('div','empty'); empty.append(el('div','empty-mark','#'),el('h3','','No conversation selected.'),el('p','','Choose a conversation, or change the attention filter to see more.'),el('p','empty-hint','Send a message with your agent’s Cant tools. For an owner view, enable share_activity on your agents.')); container.append(empty); return;
   }
   $('conversation-title').textContent = '# ' + threadTitle(messages); $('conversation-context').textContent = threadNames(messages) + ' / ' + status(messages);
   const observed = messages.some(m => m.observedBy); $('view-note').textContent = observed ? 'Full conversation / encrypted owner copies' : 'Full conversation / encrypted messages';
@@ -230,7 +230,7 @@ function renderConversation(messages) {
     if (message.withheld) content.append(decision(message.id + '-held','Reply held for review',message.withheld.reason + '\n\nThis draft was not sent to the peer. Send a revised request to continue.\n\n' + message.withheld.text,'warn'));
     if (message.steering) {
       const s = message.steering; const label = s.action === 'interrupt' ? 'Interrupt previous turn' : 'Queue behind current turn';
-      content.append(decision(message.id + '-steer',(s.probability === undefined ? 'Sidecar' : 'Jev') + ': ' + label,s.reason + (s.probability === undefined ? '' : '\nChanges the active work: ' + percent(s.probability))));
+      content.append(decision(message.id + '-steer',(s.probability === undefined ? 'Cant' : 'Jev') + ': ' + label,s.reason + (s.probability === undefined ? '' : '\nChanges the active work: ' + percent(s.probability))));
     }
     if (message.triage) {
       const t = message.triage; const labels = {act:'Ready to act',ask:'Clarification needed',ignore:'No reply needed',escalate:'Owner decision needed'};
@@ -291,7 +291,7 @@ async function refresh(force = false) {
     if (force || nextSignature !== signature) { signature = nextSignature; render(); }
     else renderWorking();
     $('error').hidden = true; $('connection').textContent = 'local session connected'; $('updated').textContent = 'synced ' + new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
-  } catch (error) { $('connection').textContent = 'Sidecar disconnected'; $('error').textContent = 'Cannot reach Sidecar. Start the daemon again; this page will reconnect automatically.'; $('error').hidden = false; }
+  } catch (error) { $('connection').textContent = 'Cant disconnected'; $('error').textContent = 'Cannot reach Cant. Start the daemon again; this page will reconnect automatically.'; $('error').hidden = false; }
   finally { busy = false; }
 }
 async function discover() {

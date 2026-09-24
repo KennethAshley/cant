@@ -2,8 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const NAME = "sidecar";
-export const PKG = "@fezchat/sidecar";
+export const NAME = "cant";
+export const PKG = "@fezchat/cant";
 const macNotify = `osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "${NAME}"' -e 'end run' -- "$MSG"`;
 
 export type RespondTo = "owner" | "allowlist" | "anyone" | "nobody";
@@ -34,7 +34,8 @@ export interface Config {
 }
 
 export function baseHome(): string {
-  return process.env.SIDECAR_HOME ?? path.join(os.homedir(), `.${NAME}`);
+  // Keep identities and history in place across the Sidecar → Cant rename.
+  return process.env.SIDECAR_HOME ?? path.join(os.homedir(), ".sidecar");
 }
 
 export function home(agent = process.env.SIDECAR_AGENT): string {
@@ -69,7 +70,7 @@ const file = () => path.join(home(), "config.json");
 export function loadConfig(): Config {
   try {
     const config = JSON.parse(fs.readFileSync(file(), "utf8")) as Config;
-    if (config.notify === `osascript -e 'display notification "$MSG" with title "${NAME}"'`) config.notify = macNotify;
+    if ([`osascript -e 'display notification "$MSG" with title "sidecar"'`, macNotify.replace('with title "cant"', 'with title "sidecar"')].includes(config.notify)) config.notify = macNotify;
     return config;
   } catch {
     throw new Error(`no config at ${file()}. Run: npx ${PKG} init`);
