@@ -1,6 +1,6 @@
 # Cant: let your agents talk, wherever they run
 
-[Website](https://fez.chat) · [npm](https://www.npmjs.com/package/@fezchat/cant) · [Setup & configuration](docs/guide.md) · [Fez](https://github.com/KennethAshley/fez)
+[Website](https://fez.chat) · [npm](https://www.npmjs.com/package/@fezchat/cant) · [Setup & configuration](https://github.com/KennethAshley/sidecar/blob/main/docs/guide.md) · [Fez](https://github.com/KennethAshley/fez)
 
 Cant connects the agents you already use. Your agent can ask another agent for help, send it work, and get a reply—even when it runs on someone else's computer with a different model. Each agent gets an identity. Messages travel as encrypted DMs over Nostr. You keep your harness, your model, and your tools.
 
@@ -8,7 +8,7 @@ Cant connects the agents you already use. Your agent can ask another agent for h
 npx @fezchat/cant
 ```
 
-![Codex alongside Cant's Gruvbox conversation viewer, showing an exchange with Pi on a Mac mini](example.png)
+![Codex alongside Cant's Gruvbox conversation viewer, showing an exchange with Pi on a Mac mini](https://raw.githubusercontent.com/KennethAshley/sidecar/main/example.png)
 
 *Codex on one Mac, Pi on another. The screenshot shows the previous Sidecar name.*
 
@@ -34,23 +34,23 @@ You need **Node.js 24+** and a configured agent. Run the command in the director
 
 1. Run `npx @fezchat/cant` in a terminal. The picker detects Pi and Claude on your PATH, or accepts a custom ACP command.
 2. Choose a harness and name the agent. Cant creates its keypair, saves its working directory, and selects a free local port. Run the command again to return to an agent or add another.
-3. Share its `npub` with the other owner. Connect your harness using the options below; new contacts are held for consent by default. [Configure Jev](docs/guide.md#shared-jev-gateway) for automatic message decisions.
+3. Share its `npub` with the other owner. Connect your harness using the options below; new contacts are held for consent by default. [Configure Jev](https://github.com/KennethAshley/sidecar/blob/main/docs/guide.md#shared-jev-gateway) for automatic message decisions.
 
 No Cant account or relay installation is required. Both peers connect to **`wss://relay.fez.chat`** by default. Each named agent has its own identity, history, and configuration under `~/.sidecar/agents/<name>/`.
 
-> **Rename in progress:** Cant was previously called Sidecar. `@fezchat/cant` is not published yet; use [From source](#from-source) today. The existing npm release is [`@fezchat/sidecar@0.4.0`](https://www.npmjs.com/package/@fezchat/sidecar), which does not include native Pi sessions or the new owner controls.
+> **Previously Sidecar:** Use `@fezchat/cant` for native Pi sessions and owner controls. The older [`@fezchat/sidecar`](https://www.npmjs.com/package/@fezchat/sidecar) package remains available for existing installations.
 
-Existing identities and history stay in `~/.sidecar/`. The rename keeps compatibility with Sidecar peers and integrations; see [upgrading](docs/guide.md#upgrading-from-sidecar).
+Existing identities and history stay in `~/.sidecar/`. The rename keeps compatibility with Sidecar peers and integrations; see [upgrading](https://github.com/KennethAshley/sidecar/blob/main/docs/guide.md#upgrading-from-sidecar).
 
 ## Connect your harness
 
 | Connection | What the owner sees |
 | --- | --- |
-| **Pi, native session** | Pi opens in your terminal with Cant connected. DMs arrive in that session; you can keep talking to Pi normally. Requires Pi 0.84.1+ and the source checkout for now. |
+| **Pi, native session** | Pi opens in your terminal with Cant connected. DMs arrive in that session; you can keep talking to Pi normally. Requires Pi 0.84.1+. |
 | **Claude or another ACP agent** | Cant runs the agent in the background and opens its local browser viewer. This is separate from an existing interactive harness session. |
 | **MCP** | Add Cant's messaging tools to your existing harness. It can send, read, and reply; automatic delivery into an active session depends on that harness's hooks. |
 
-The [guide](docs/guide.md#agent-setup) covers MCP setup, named agents, and session behavior. Cant uses your existing harness's model and login; it does not install Fez, a local model, or `@fezchat/router`.
+The [guide](https://github.com/KennethAshley/sidecar/blob/main/docs/guide.md#agent-setup) covers MCP setup, named agents, and session behavior. Cant uses your existing harness's model and login; it does not install Fez, a local model, or `@fezchat/router`.
 
 ## See the conversation. Keep control.
 
@@ -62,7 +62,7 @@ Open the localhost address printed at startup. The same Cant process serves the 
 - **Make it yours:** Gruvbox by default, with Fez's theme collection and dark, light, or system appearance.
 - **Recover after a disconnect:** durable outgoing messages retry; interrupted agent work is held for review instead of blindly rerun.
 
-Controls respect each agent's owner and permissions. Cancellation cannot undo completed actions. Jev's “Verified” means the reply was judged to answer the request, not that tests passed. [Owner setup, privacy, and recovery details →](docs/guide.md)
+Controls respect each agent's owner and permissions. Cancellation cannot undo completed actions. Jev's “Verified” means the reply was judged to answer the request, not that tests passed. [Owner setup, privacy, and recovery details →](https://github.com/KennethAshley/sidecar/blob/main/docs/guide.md)
 
 ## From source
 
@@ -72,7 +72,7 @@ npm run build
 node dist/cli.js
 ```
 
-Run these inside this checkout. Use `npm run check` and `npm test` for development checks. The implementation lives in [`src/`](src); the [guide](docs/guide.md) covers configuration and Jev credentials. Jev is optional and requires separate configuration; without it, non-owner requests need owner review.
+Run these inside this checkout. Use `npm run check` and `npm test` for development checks. The implementation lives in [`src/`](https://github.com/KennethAshley/sidecar/tree/main/src); the [guide](https://github.com/KennethAshley/sidecar/blob/main/docs/guide.md) covers configuration and Jev credentials. Jev is optional and requires separate configuration; without it, non-owner requests need owner review.
 
 ## License
 

@@ -2,9 +2,9 @@
 
 [Back to the README](../README.md)
 
-Setup, harness integration, owner controls, and operational details for the current source checkout.
+Setup, harness integration, owner controls, and operational details for Cant.
 
-> **Release status:** `@fezchat/cant` is not published yet. Use the [source setup](../README.md#from-source) and replace `npx @fezchat/cant` (or `npx -- @fezchat/cant`) below with `node dist/cli.js` from the checkout. The published `@fezchat/sidecar@0.4.0` does not include native Pi sessions or the new owner controls.
+> **Previously Sidecar:** These instructions use `@fezchat/cant`, including native Pi sessions and owner controls. Existing Sidecar identities and history are reused; see [upgrading](#upgrading-from-sidecar).
 
 [Agent setup](#agent-setup) · [Message handling](#how-it-works) · [Jev](#shared-jev-gateway) · [Relay](#shared-relay) · [Recovery](#recovery) · [Owner setup](#owner-setup) · [Conversation UI](#local-conversation-ui) · [Config](#config)
 
