@@ -65,17 +65,19 @@ test("no-key defaults: escalate, unknown scope, unchecked completion, no route",
 });
 
 test("verify says no below 0.5", async () => {
-  assert.equal((await verify({ ask: "a", output: "b" }, canned({ answers_ask: noul(0.2), communication_ok: noul(.95) }))).answersAsk, false);
+  assert.equal((await verify({ ask: "a", output: "b" }, canned({ answers_ask: noul(0.2) }))).answersAsk, false);
 });
 
-test("policy checks require confidence and never approve an unseen long suffix", async () => {
-  for (const [p, expected] of [[.69, false], [.7, true]] as const) {
-    const verdict = await verify({ask: "Explain in detail", output: "A useful explanation"}, canned({answers_ask: noul(.9), communication_ok: noul(p)}));
-    assert.equal(verdict.communicationOK, expected);
-  }
-  await assert.rejects(verify({ask: "x", output: "y"}, canned({answers_ask: noul(.9)})), /policy verdict/);
-  const long = await verify({ask: "x", output: "x".repeat(20_001)}, async () => { assert.fail("must not judge a truncated output"); });
-  assert.equal(long.communicationOK, false);
+test("completion verification accepts long replies without a writing-style verdict", async () => {
+  let checks = 0;
+  const result = await verify({ask: "Explain in detail", output: "Requested detail. ".repeat(1500)}, async (_s, q) => {
+    checks++;
+    assert.ok(!("communication_ok" in q));
+    return {answers_ask: noul(.9), needs_owner: noul(.9), attention_urgency: choice("now", .9)};
+  });
+  assert.equal(checks, 1);
+  assert.equal(result.answersAsk, true);
+  assert.equal(result.attention, "now");
 });
 
 test("attention filters chatter, defers useful replies, and fails visible", async () => {
@@ -88,7 +90,7 @@ test("attention filters chatter, defers useful replies, and fails visible", asyn
       calls++;
       assert.ok("answers_ask" in questions && "needs_owner" in questions);
       assert.ok(JSON.stringify(state).includes(msg.text));
-      return { ...answers, answers_ask: noul(0.9), communication_ok: noul(.95) };
+      return { ...answers, answers_ask: noul(0.9) };
     });
     assert.equal(result.attention, wanted);
     assert.equal(calls, 1, "completion and attention share one request");

@@ -5,10 +5,12 @@ import net from "node:net";
 import { spawn } from "node:child_process";
 import { emitKeypressEvents } from "node:readline";
 import readline from "node:readline/promises";
+import { fileURLToPath } from "node:url";
 import { baseHome, home, defaultConfig, loadConfig, saveConfig, PKG, type Config } from "./config.ts";
 import { generateNsec, npubOf, pubkeyOf, secretFromNsec } from "./nostr.ts";
+import { PiHandler } from "./pi.ts";
 
-type Agent = { id: string; label: string; detail: string; handler: string; protocol: "acp" | "pi" };
+type Agent = { id: string; label: string; detail: string; handler: string; protocol: NonNullable<Config["protocol"]> };
 
 export function discoverAgents(searchPath = process.env.PATH ?? "", piDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent")): Agent[] {
   const executable = (name: string) => searchPath.split(path.delimiter).some(dir => {
@@ -20,7 +22,7 @@ export function discoverAgents(searchPath = process.env.PATH ?? "", piDir = proc
     if (typeof settings.defaultModel === "string") model = settings.defaultModel;
   } catch { /* Pi can also be configured through environment variables. */ }
   return [
-    { id: "pi", label: "Pi", detail: model, handler: "pi", protocol: "pi" as const },
+    { id: "pi", label: "Pi", detail: `${model} · interactive`, handler: "pi", protocol: "pi-interactive" as const },
     { id: "claude", label: "Claude", detail: "existing login", handler: "npx -y @agentclientprotocol/claude-agent-acp", protocol: "acp" as const },
   ].filter(a => executable(a.id));
 }
@@ -56,6 +58,30 @@ export async function agentStatus(config: Config): Promise<"running" | "starting
     if (health.npub !== npubOf(pubkeyOf(secretFromNsec(config.nsec)))) return "occupied";
     return response.ok && health.ok ? "running" : response.status === 503 && health.ok === false ? "starting" : "occupied";
   } catch { return await portFree(config.port) ? "stopped" : "occupied"; }
+}
+
+export async function launchPi(config: Config): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("Interactive Pi needs a terminal. Run the Sidecar picker in your terminal.");
+  if (await agentStatus(config) !== "stopped") throw new Error("This Sidecar identity is already running. Use its existing Pi terminal, or connect another agent.");
+  await new PiHandler([config.handler], {permissions: config.acp.permissions, timeoutMs: config.timeoutMs, cwd: config.cwd}).start();
+  const extension = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./pi-extension.ts" : "./pi-extension.js", import.meta.url));
+  const args = ["--extension", extension];
+  try {
+    const session = fs.readFileSync(path.join(home(), "pi-session"), "utf8").trim();
+    if (session && fs.existsSync(session)) args.push("--session", session);
+  } catch { /* First launch starts a normal saved Pi session. */ }
+  console.log(`\n  Opening Pi · ${plain(config.name)}\n  Identity  ${npubOf(pubkeyOf(secretFromNsec(config.nsec)))}\n  Viewer    http://localhost:${config.port}\n  Sidecar stays connected while this Pi session is open.\n`);
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(config.handler, args, {cwd: config.cwd, stdio: "inherit", env: {...process.env, SIDECAR_HOME: path.resolve(baseHome())}});
+    // Pi owns Ctrl-C while attached to the terminal; the launcher must not exit first.
+    const waitForPi = () => {};
+    process.on("SIGINT", waitForPi);
+    child.once("error", error => { process.off("SIGINT", waitForPi); reject(error); });
+    child.once("exit", code => {
+      process.off("SIGINT", waitForPi);
+      if (code) reject(new Error(`Pi exited with code ${code}`)); else resolve();
+    });
+  });
 }
 
 // Strip control sequences from saved names/model labels before rendering them in a terminal.
@@ -143,6 +169,7 @@ export async function picker(start: () => Promise<void>): Promise<void> {
     saveConfig(config);
   }
   console.log(`\n  Connecting ${plain(config.name)}…`);
+  if (config.protocol === "pi-interactive") { await launchPi(config); return; }
   await start();
   const url = `http://localhost:${config.port}`;
   console.log(`\n  Name      ${plain(config.name)}\n  Identity  ${npubOf(pubkeyOf(secretFromNsec(config.nsec)))}\n  Relay     ${config.relays.join(", ")}\n  Chat      ${url}\n\n  ${ochre("●")} Running\n`);

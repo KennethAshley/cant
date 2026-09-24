@@ -7,7 +7,7 @@ import { NAME, PKG, defaultConfig, home, loadConfig, saveConfig } from "./config
 import { generateNsec, secretFromNsec, pubkeyOf, npubOf, profileEvent, Relay } from "./nostr.ts";
 import { Handler } from "./acp.ts";
 import { PiHandler } from "./pi.ts";
-import { picker } from "./picker.ts";
+import { picker, launchPi } from "./picker.ts";
 import { Inbox } from "./inbox.ts";
 import { Daemon, serveHttp } from "./daemon.ts";
 import { rpc, serveMcp, ensureDaemon } from "./mcp.ts";
@@ -52,6 +52,7 @@ async function init(): Promise<void> {
 }
 
 async function up(): Promise<void> {
+  if (loadConfig().protocol === "pi-interactive") { await launchPi(loadConfig()); return; }
   const foreground = rest.includes("--foreground");
   if (!foreground) {
     await ensureDaemon();

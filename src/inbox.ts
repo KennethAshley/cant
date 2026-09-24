@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { home } from "./config.ts";
-import type { Message } from "./nostr.ts";
+import type { Message, ReviewAction } from "./nostr.ts";
 import type { Event } from "nostr-tools/pure";
 import type { Triage, Steering } from "./decide.ts";
 
@@ -12,6 +12,7 @@ export interface Stored extends Message {
   triage?: Triage;
   steering?: Steering;
   withheld?: {text: string; reason: string};
+  review?: {action: ReviewAction; by: string};
   delivery?: "pending" | "sent";
   work?: "pending" | "preparing" | "running" | "finished" | "interrupted";
 }
@@ -107,6 +108,10 @@ export class Inbox {
   outbox(): [string, Event[]][] { return [...this.pending]; }
   delivered(id: string): void { this.patch(id, { delivery: "sent" }); }
   setWork(id: string, work: Stored["work"]): void { this.patch(id, { work }); }
+  setReview(id: string, review: NonNullable<Stored["review"]>): void {
+    // Approval and pending work share one durable write; replay cannot grant another turn.
+    this.patch(id, {review, parked: false, work: review.action === "approve" ? "pending" : "finished"});
+  }
 
   isPaused(thread: string): boolean { return this.controls.get(thread)?.paused ?? false; }
   setThreadControl(thread: string, from: string, at: number, id: string, paused: boolean, action?: "stop" | "pause" | "resume"): boolean {

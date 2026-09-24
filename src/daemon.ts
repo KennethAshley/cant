@@ -4,11 +4,11 @@ import type { Event } from "nostr-tools/pure";
 import type { Config } from "./config.ts";
 import { Inbox, type Stored } from "./inbox.ts";
 import { pubkeyFromNpub, pubkeyOf, npubOf, secretFromNsec, wrap, unwrap, titleSchema, type Message, type MessageType, type Profile, type Outgoing, type Verification, type Attention } from "./nostr.ts";
-import { triage, steer, scope, verify, attention, route, typesafeAsk, COMMUNICATION_POLICY, type Ask, type Steering } from "./decide.ts";
-import { projectTimeline, attentionOf } from "./activity.ts";
+import { triage, steer, scope, verify, attention, route, typesafeAsk, type Ask, type Steering } from "./decide.ts";
+import { projectTimeline, attentionOf, needsReview } from "./activity.ts";
 import { uiHtml, uiCss, uiJs } from "./ui.ts";
 import { KIND_WORKING, WORKING_TTL_MS, wrapWorking, unwrapWorking, type Working } from "./nostr.ts";
-import { parseControl, controlActionSchema, type Control, type ControlAction } from "./nostr.ts";
+import { parseControl, controlActionSchema, reviewActionSchema, type Control, type ControlAction, type ReviewAction } from "./nostr.ts";
 
 export interface RelayLike {
   publish(events: Event[]): Promise<void>;
@@ -256,7 +256,7 @@ export class Daemon {
   }
 
   private async admit(s: Stored): Promise<void> {
-    if (this.stopped) return;
+    if (this.stopped || s.review?.action === "deny") return;
     const m = s;
     if (m.type === "cancel") {
       const root = this.deps.inbox.thread(m.thread)[0];
@@ -276,15 +276,16 @@ export class Daemon {
       this.deps.inbox.setWork(m.id, "finished");
       return;
     }
-    if (!this.passesGate(m.from)) {
+    if (s.review?.action !== "approve" && !this.passesGate(m.from)) {
       if (this.deps.config.respond_to !== "allowlist") { this.deps.inbox.setWork(m.id, "finished"); return; }
       const { inScope } = await scope({ message: m, me: this.me }, this.ask).catch(() => ({ inScope: undefined }));
       if (this.stopped || s.work === "finished") return;
       this.deps.inbox.setTriage(m.id, { action: "escalate", confidence: 0, urgency: 1, inScope: inScope ?? 0, reason: "stranger" });
-      await this.shareActivity(s);
       this.deps.inbox.park(m.id);
+      await this.shareActivity(s);
+      if (s.review) return;
       const verdict = inScope === undefined ? "scope unknown, Jev unavailable" : `in scope ${inScope.toFixed(2)}`;
-      await this.escalate(s, `consent needed: ${verdict}. Reply: sidecar allow ${npubOf(m.from)}`);
+      await this.escalate(s, `consent needed: ${verdict}. Review this request in the receiving agent's Sidecar or its owner's webapp.`);
       return;
     }
     if (!this.deps.inbox.isPaused(s.thread)) await this.dispatch(s);
@@ -299,6 +300,7 @@ export class Daemon {
     }
     const active = this.running.get(s.thread);
     if (active) {
+      if (active.message.id === s.id || this.queued.get(s.thread)?.some(m => m.id === s.id)) return;
       this.queued.set(s.thread, [...(this.queued.get(s.thread) ?? []), s]);
       // Sharing a thread id does not let another peer redirect someone else's work.
       if (active.message.from !== s.from) return;
@@ -336,6 +338,11 @@ export class Daemon {
         ["ask", "answer", "done", "cant", "escalate", "cancel"].includes(m.type) &&
         ((m.from === s.from && m.to === this.pubkey) || (m.from === this.pubkey && m.to === s.from)));
       turn.thread = thread;
+      if (s.review?.action === "approve") {
+        await this.run(s, "act", thread);
+        if (!this.stopped && s.work !== "pending") this.deps.inbox.setWork(s.id, "finished");
+        return;
+      }
       const t = await triage(
         { message: s, thread, sender: this.profiles.get(s.from), me: this.me, owner: s.from === this.owner, thresholds: this.deps.config.thresholds },
         this.ask,
@@ -367,7 +374,6 @@ export class Daemon {
     let instruction = mode === "act"
       ? "Respond to the marked message using this conversation as context. Continue unfinished work when a reply supplies a missing detail. Do not repeat finished work. Reply with the result only."
       : "Do not do the task yet. Reply with exactly one clarifying question.";
-    instruction += "\nShared communication policy: " + COMMUNICATION_POLICY;
     let title = thread.find(m => m.title)?.title;
     if (!title) instruction += '\nBefore your reply, add one metadata line: <sidecar-title>A short title</sidecar-title>. Choose a 2–5 word conversation title (maximum 80 characters) based on the topic. Then a blank line and your normal reply. No other wrapper.';
     else instruction += '\nReply in plain text without title metadata.';
@@ -391,19 +397,17 @@ export class Daemon {
       title ??= titleSchema.safeParse(metadata[1]).data;
       out.text = metadata[2].trim();
     }
+    // A clarifying question blocks progress and always needs attention.
+    if (mode === "ask") { await this.emit(s.from, { text: out.text, type: "answer", thread: s.thread, depth: s.depth + 1, attention: "now", title }, {id: s.id, state: "finished"}); return; }
     let v;
-    try { v = await verify({ ask: s.text, output: out.text, thread, clarification: mode === "ask" }, this.ask); }
+    try { v = await verify({ ask: s.text, output: out.text, thread }, this.ask); }
     catch {
       if (this.stopped || this.cancelled.has(s.thread)) return;
       return this.holdReply(s, out.text, "Jev check unavailable; the draft has not been approved.", { status: "unavailable" }, title);
     }
     if (this.stopped || this.cancelled.has(s.thread)) return;
     const verification: Verification = v.p === undefined ? { status: "skipped" } : { status: v.answersAsk ? "passed" : "failed", probability: v.p };
-    if (!v.communicationOK || !v.answersAsk) return this.holdReply(s, out.text, !v.communicationOK
-      ? "The reply did not pass the shared communication policy, or exceeded the 20,000-character review limit."
-      : "The reply did not answer the request.", v.p === undefined || v.answersAsk ? undefined : {status: "failed", probability: v.p}, title);
-    // A clarifying question blocks progress and always needs attention.
-    if (mode === "ask") { await this.emit(s.from, { text: out.text, type: "answer", thread: s.thread, depth: s.depth + 1, attention: "now", title }, {id: s.id, state: "finished"}); return; }
+    if (!v.answersAsk) return this.holdReply(s, out.text, "The reply did not answer the request.", verification, title);
     await this.outcome(s, "done", out.text, verification, v.attention, "finished", title);
   }
 
@@ -473,15 +477,30 @@ export class Daemon {
   private async sendControl(to: string, thread: string, control: Control): Promise<void> {
     const msg = {type: "control" as const, thread, text: JSON.stringify(control), attention: "none" as const};
     if (to !== this.pubkey) { await this.emit(to, msg); return; }
-    const stored = this.deps.inbox.append(wrap(this.secret, to, msg).message, {read: true, work: control.kind === "command" ? "pending" : "finished"});
-    if (control.kind === "command") await this.handleControl(stored);
+    const stored = this.deps.inbox.append(wrap(this.secret, to, msg).message, {read: true, work: control.kind !== "receipt" ? "pending" : "finished"});
+    if (control.kind !== "receipt") await this.handleControl(stored);
   }
 
   private async handleControl(message: Stored, recovering = false): Promise<void> {
     const command = parseControl(message.text);
-    if (command?.kind !== "command") { this.deps.inbox.setWork(message.id, "finished"); return; }
+    if (!command || command.kind === "receipt") { this.deps.inbox.setWork(message.id, "finished"); return; }
     const box = this.deps.inbox, root = box.thread(message.thread)[0];
     const owner = message.from === this.pubkey || message.from === this.owner;
+    if (command.kind === "review") {
+      const source = box.get(command.request);
+      const valid = owner && !!this.deps.handler && source?.to === this.pubkey && source.thread === message.thread && source.depth < this.deps.config.depthLimit;
+      const accepted = !!valid && (source.review
+        ? source.review.action === command.action && source.review.by === message.from
+        : needsReview(source) && this.running.get(source.thread)?.message.id !== source.id);
+      const first = accepted && !source!.review;
+      if (first) box.setReview(source!.id, {action: command.action, by: message.from});
+      // Publish the receipt before completing the command so recovery can repair a crash here.
+      await this.sendControl(message.from, message.thread, {kind: "receipt", request: message.id, accepted, paused: box.isPaused(message.thread)});
+      if (accepted) await this.shareActivity(source!);
+      box.setWork(message.id, "finished");
+      if (first && command.action === "approve" && !recovering) void this.admit(source!).catch(() => console.error("approved request failed"));
+      return;
+    }
     const authorized = owner || (command.action === "stop" && root?.from === message.from);
     const wasPaused = box.isPaused(message.thread);
     const paused = command.action === "pause" ? true : command.action === "resume" ? false : wasPaused;
@@ -511,6 +530,13 @@ export class Daemon {
     return {targets};
   }
 
+  async review(args: {id: string; action: ReviewAction}): Promise<void> {
+    const action = reviewActionSchema.parse(args.action);
+    const source = this.timeline().messages.find(m => m.id === args.id);
+    if (!source || !needsReview(source)) throw new Error("request is not awaiting a decision");
+    await this.sendControl(source.to, source.thread, {kind: "review", request: source.id, action});
+  }
+
   private controlStates() {
     const records = this.deps.inbox.all().filter(m => m.type === "control").map(m => ({m, c: parseControl(m.text)}));
     const latest = new Map<string, typeof records[number]>();
@@ -527,7 +553,13 @@ export class Daemon {
       (result[m.thread] ??= []).push({pubkey: m.to, action: c.action, delivery: m.delivery,
         ...(receipt?.kind === "receipt" ? {accepted: receipt.accepted, paused: receipt.paused} : {})});
     }
-    return result;
+    const reviews: Record<string, {action: ReviewAction; accepted?: boolean}> = {};
+    for (const {m, c} of records) {
+      if (c?.kind !== "review" || m.from !== this.pubkey) continue;
+      const receipt = records.find(r => r.m.from === m.to && r.m.to === this.pubkey && r.m.thread === m.thread && r.c?.kind === "receipt" && r.c.request === m.id)?.c;
+      reviews[c.request] = {action: c.action, ...(receipt?.kind === "receipt" ? {accepted: receipt.accepted} : {})};
+    }
+    return {controls: result, reviews};
   }
 
   async findAgents(query?: string): Promise<Profile[]> {
@@ -548,7 +580,7 @@ export class Daemon {
       messages: projectTimeline(this.deps.inbox.all()).map(m => ({...m, attention: attentionOf(m)})), relays: this.deps.config.relays,
       sharing: { enabled: !!this.deps.config.share_activity, owner: this.deps.config.owner },
       working: [...this.working.values()].filter(status => status.active),
-      controls: this.controlStates(),
+      ...this.controlStates(),
       paused: [...new Set(this.deps.inbox.all().map(m => m.thread))].filter(thread => this.deps.inbox.isPaused(thread)),
     };
   }
@@ -568,7 +600,7 @@ export class Daemon {
 
 // localhost HTTP endpoint
 
-export type Rpc = "send" | "inbox" | "reply" | "allow" | "cancel" | "control" | "find_agents" | "whoami" | "timeline" | "react";
+export type Rpc = "send" | "inbox" | "reply" | "allow" | "cancel" | "control" | "review" | "find_agents" | "whoami" | "timeline" | "react";
 
 export function serveHttp(daemon: Daemon, port: number, ready = () => true): Promise<() => void> {
   const server = http.createServer(async (req, res) => {
@@ -604,6 +636,7 @@ export function serveHttp(daemon: Daemon, port: number, ready = () => true): Pro
         allow: () => daemon.allow(String(args.npub)),
         cancel: () => daemon.cancel(String(args.thread)),
         control: () => daemon.control(args as never),
+        review: () => daemon.review(args as never),
         find_agents: () => daemon.findAgents(args.query as string | undefined),
         whoami: () => daemon.whoami(),
         timeline: () => daemon.timeline(),

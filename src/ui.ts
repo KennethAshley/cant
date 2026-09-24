@@ -1,6 +1,7 @@
 // Served by the daemon: no frontend build, external assets, or browser-held private keys.
 import { themes, themeCss, appearanceJs } from "./themes.ts";
 import type { Message } from "./nostr.ts";
+import { needsReview } from "./activity.ts";
 
 export function threadTitle(messages: Pick<Message, "thread" | "type" | "text" | "title">[]): string {
   const conversation = messages.filter(m => ["ask", "answer", "done", "cant", "escalate"].includes(m.type));
@@ -44,6 +45,7 @@ export const uiHtml = `<!doctype html>
 
 export const uiCss = `
 .working{padding:10px 24px;color:var(--secondary);font-size:11px;border-top:1px solid var(--line)}
+.request-review{margin-top:12px;padding:12px;border-left:2px solid var(--accent);background:var(--base)}.request-review p{font-size:11px;line-height:1.7;color:var(--soft);margin-bottom:9px}.request-review button+button{margin-left:8px}
 :root{color-scheme:dark;font-family:ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;font-size:13px;color:var(--ink);background:var(--base);font-synthesis:none;--base:#1d2021;--panel:#282828;--raised:#32302f;--line:#504945;--ink:#ebdbb2;--soft:#bdae93;--muted:#a89984;--accent:#d79921;--secondary:#83a598;--tertiary:#d3869b;--code:#d5c4a1;--error:#fabd2f}
 *{box-sizing:border-box}body{margin:0}button,input,select{font:inherit;color:inherit}button{cursor:pointer}button:disabled{cursor:wait;opacity:.6}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}h1,h2,h3,p{margin:0}[hidden]{display:none!important}::selection{background:var(--line);color:var(--ink)}*{scrollbar-width:thin;scrollbar-color:var(--line) transparent}
 .workspace{display:grid;grid-template-columns:270px minmax(0,1fr);height:100dvh;max-width:1900px;margin:auto;border-inline:1px solid var(--line)}
@@ -72,13 +74,14 @@ ${themeCss}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
 `;
 
-export const uiJs = appearanceJs + '\n' + threadTitle.toString() + String.raw`
+export const uiJs = appearanceJs + '\n' + threadTitle.toString() + '\n' + needsReview.toString() + String.raw`
 'use strict';
 document.addEventListener('DOMContentLoaded', () => {
 const $ = id => document.getElementById(id);
 const el = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
 let state, selected = location.hash.slice(1), signature = '', busy = false, controlling = false, toastTimer;
 const expanded = new Set();
+const reviewing = new Set();
 const short = key => key ? key.slice(0, 8) + '…' : 'Unknown';
 const name = key => key === state.me.pubkey ? state.me.name : state.profiles.find(p => p.pubkey === key)?.name || short(key);
 const percent = n => Math.round(n * 100) + '%';
@@ -108,6 +111,8 @@ function status(messages) {
   if (last.type === 'done') return last.verification?.status === 'passed' ? '✓ Completed · Jev verified' : '✓ Completed · not verified';
   if (last.type === 'cant') return 'Needs attention';
   if (last.triage?.action === 'ignore') return 'No reply needed';
+  const request = messages.filter(m => ['ask','answer'].includes(m.type)).at(-1);
+  if (last.type === 'escalate' && request?.review && last.from === request.to) return request.review.action === 'deny' ? 'Request denied' : 'Request approved once';
   if (last.type === 'escalate' || last.triage?.action === 'escalate') return 'Owner decision needed';
   if (last.type === 'ack') return 'Accepted · working';
   if (last.triage?.action === 'ask' || last.type === 'answer') return 'Conversation open';
@@ -176,6 +181,30 @@ function reactions(message, messages) {
   for (const [emoji,label] of [['👍','Thumbs up'],['👀','Eyes'],['🎉','Celebrate'],['❤️','Heart']]) { const button = el('button','',emoji); button.setAttribute('aria-label',label); button.addEventListener('click',() => react(message.id,emoji,button)); options.append(button); }
   picker.append(options); row.append(picker); return row;
 }
+function requestReview(message) {
+  const panel = el('div','request-review');
+  if (message.review) {
+    panel.append(el('p','',(message.review.action === 'approve' ? 'Approved once' : 'Denied') + ' by ' + name(message.review.by)));
+    return panel;
+  }
+  const sent = state.reviews?.[message.id];
+  const pending = reviewing.has(message.id) || (sent && sent.accepted !== false);
+  panel.append(el('p','',sent && sent.accepted !== false
+    ? (sent.action === 'approve' ? 'Approval' : 'Denial') + (sent.accepted ? ' accepted by ' : ' awaiting ') + name(message.to)
+    : 'Owner decision · Allow this request to run on ' + name(message.to) + '? Future requests still go through the normal checks.'));
+  if (sent?.accepted === false) panel.append(el('p','','Decision declined. Only this agent’s owner can decide, and the request must still be held.'));
+  for (const [action,label] of [['approve','Approve once'],['deny','Deny']]) {
+    const button = el('button','secondary',label); button.disabled = !!pending;
+    button.addEventListener('click',async () => {
+      reviewing.add(message.id); render();
+      try { await rpc('review',{id:message.id,action}); await refresh(true); }
+      catch (error) { toast(error.message); }
+      finally { reviewing.delete(message.id); render(); }
+    });
+    panel.append(button);
+  }
+  return panel;
+}
 function renderConversation(messages) {
   const container = $('timeline'); const wasBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100; const oldTop = container.scrollTop;
   container.replaceChildren(); $('copy-thread').hidden = !messages; $('thread-controls').hidden = !messages;
@@ -206,12 +235,13 @@ function renderConversation(messages) {
     if (message.triage) {
       const t = message.triage; const labels = {act:'Ready to act',ask:'Clarification needed',ignore:'No reply needed',escalate:'Owner decision needed'};
       if (t.action === 'unavailable') {
-        content.append(decision(message.id + '-triage','Jev check unavailable','No decision was returned; this message did not start agent work. Send a new request to retry.\n\n' + t.reason,'warn'));
+        content.append(decision(message.id + '-triage','Jev check unavailable','No decision was returned.' + (needsReview(message) ? ' An owner can approve this held request once or deny it.' : '') + '\n\n' + t.reason,'warn'));
       } else {
         const label = t.contradiction >= 0.8 ? 'Possible contradiction' : labels[t.action];
         content.append(decision(message.id + '-triage','jev: ' + label + ' ' + percent(t.confidence),'Decision confidence: ' + percent(t.confidence) + '\nIn scope: ' + percent(t.inScope) + (t.contradiction === undefined ? '' : '\nContradiction probability: ' + percent(t.contradiction)) + '\n' + t.reason,t.action === 'escalate' ? 'warn' : ''));
       }
     }
+    if (message.review || needsReview(message)) content.append(requestReview(message));
     if (message.verification) {
       const v = message.verification; const label = {passed:'jev: Verified ' + percent(v.probability || 0),failed:'jev: Incomplete',unavailable:'jev: Verification unavailable',skipped:'jev: Not checked'}[v.status];
       const detail = v.status === 'passed' || v.status === 'failed' ? 'Reported by ' + name(message.from) + '\nJev estimated a ' + percent(v.probability) + ' chance that this output answers the request. This is a completion check, not a test-suite result.' : v.status === 'skipped' ? 'No Jev key was configured for this completion. The result has not been checked by Jev.' : 'The Jev check failed. Review this result before treating the task as complete.';

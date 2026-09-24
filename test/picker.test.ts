@@ -16,6 +16,7 @@ test("discovery shows installed agents together and reads Pi's configured model 
   const agents = discoverAgents(dir, dir);
   assert.deepEqual(agents.map(a => a.id), ["pi", "claude"]);
   assert.match(agents[0].detail, /kimi-k3/);
+  assert.equal(agents[0].protocol, "pi-interactive", "Pi opens in the user's terminal through the bundled extension");
   assert.doesNotMatch(JSON.stringify(agents), /not-for-sidecar/);
   fs.chmodSync(path.join(dir, "pi"), 0o644);
   assert.deepEqual(discoverAgents(dir, dir).map(a => a.id), ["claude"]);

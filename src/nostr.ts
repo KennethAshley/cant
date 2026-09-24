@@ -17,8 +17,11 @@ export const MESSAGE_TYPES = ["ask", "ack", "answer", "done", "cant", "cancel", 
 export type MessageType = (typeof MESSAGE_TYPES)[number] | "reaction" | "activity" | "control";
 export const controlActionSchema = z.enum(["stop", "pause", "resume"]);
 export type ControlAction = z.infer<typeof controlActionSchema>;
+export const reviewActionSchema = z.enum(["approve", "deny"]);
+export type ReviewAction = z.infer<typeof reviewActionSchema>;
 const controlSchema = z.discriminatedUnion("kind", [
   z.object({kind: z.literal("command"), action: controlActionSchema, at: z.number().int().nonnegative().safe()}),
+  z.object({kind: z.literal("review"), action: reviewActionSchema, request: z.string().regex(/^[0-9a-f]{64}$/)}),
   z.object({kind: z.literal("receipt"), request: z.string().regex(/^[0-9a-f]{64}$/), accepted: z.boolean(), paused: z.boolean()}),
 ]);
 export type Control = z.infer<typeof controlSchema>;

@@ -4,11 +4,17 @@ Any agent can talk to any other agent. No signup, no server to install.
 
     npx @fezchat/sidecar
 
-The terminal picker detects **Pi** and **Claude** on your PATH. Choose an agent, give it a name, and Sidecar creates its identity, selects an unused local port, starts its daemon, and opens its conversation UI. Run the command again to open a running agent, start a stopped one, or connect another. Custom ACP commands are also supported.
+The terminal picker detects **Pi** and **Claude** on your PATH. Choose an agent, give it a name, and Sidecar creates its identity and selects an unused local port. Pi opens in your terminal with the bundled Sidecar extension. Claude and custom ACP commands run in the background and open the conversation viewer. Run the command again to return to a saved agent or connect another.
 
-Each named agent has a separate key, config, inbox, and conversation UI under `~/.sidecar/agents/<name>/`. Multiple agents can run together. Existing `~/.sidecar/config.json` setups appear as the original agent and keep their identity. The working directory is saved from where you run setup; Sidecar creates its own agent sessions rather than attaching to an already-open terminal session.
+Each named agent has a separate key, config, inbox, and conversation UI under `~/.sidecar/agents/<name>/`. Multiple agents can run together. Existing `~/.sidecar/config.json` setups appear as the original agent and keep their identity. The working directory is saved from where you run setup.
 
-Pi uses its native RPC protocol and existing provider/model/login settings (Pi **0.84.1+**). There is no Pi dependency or adapter download. Claude uses the existing `npx` ACP adapter. With Pi, `acp.permissions: "deny"` disables tools and extension discovery; `"allow"` uses your normal Pi tools. Sidecar's sender consent and allowlist rules still apply.
+Pi **0.84.1+** uses your existing provider, model, login, and extensions. Talk to your agent normally in Pi. Incoming Sidecar DMs pass the existing consent and Jev checks, wait for Pi to become idle, and appear as labeled messages in that same session. The agent replies with `sidecar_reply`; only the explicit reply text is verified and sent. Ordinary Pi responses and the owner's transcript are not automatically forwarded. `sidecar_send`, `sidecar_inbox`, and `sidecar_find_agents` support owner-directed communication. There is no Pi package dependency or global Pi configuration change.
+
+Sidecar runs inside the interactive Pi process and disconnects when Pi exits. Relaunching the saved Sidecar opens its last saved Pi session; Pi's own `/resume` can select another session. This opens Pi with an extension, rather than attaching to a terminal process that was started without it. A second launch of the same running identity is refused. The viewer remains available at the printed localhost address while Pi is open.
+
+Incoming DMs share the owner's Pi context; this is not a separate security sandbox. Sidecar does not read or export that transcript. `acp.permissions: "deny"` blocks non-Sidecar tool calls during a DM turn; `"allow"` retains the harness's normal tools and policies. Cancellation of an active DM aborts Pi's current operation, which can include owner steering added during that turn. Cancelling a queued DM leaves the owner's current work alone.
+
+Existing configurations with `protocol: "pi"` retain the background RPC mode and separate sessions. New Pi picker entries use `protocol: "pi-interactive"`. In background Pi mode, `acp.permissions: "deny"` disables tools and extension discovery. Claude continues to use the `npx` ACP adapter. Sender consent and allowlist rules apply to every mode.
 
 For scripts or managing a particular agent:
 
@@ -27,11 +33,11 @@ To give an existing interactive harness Sidecar tools, add to its MCP config (us
 
     {"sidecar": {"command": "npx", "args": ["@fezchat/sidecar", "mcp"]}}
 
-MCP-capable harnesses then have `send`, `inbox`, `reply`, `react`, `allow`, `cancel`, `find_agents`, `whoami`. Pi can receive and answer messages through its Sidecar sessions without MCP; this does not add MCP tools to Pi's interactive terminal.
+MCP-capable harnesses then have `send`, `inbox`, `reply`, `react`, `allow`, `cancel`, `find_agents`, `whoami`. Pi's interactive extension supplies native Pi tools and does not require MCP.
 
 ## How it works
 
-Every agent and every human is a Nostr npub. Messages are NIP-17 encrypted DMs over `wss://relay.fez.chat` by default. Your daemon drives your coding harness over the Agent Client Protocol, or Pi's native RPC. Other ACP agents can use a custom handler command.
+Every agent and every human is a Nostr npub. Messages are NIP-17 encrypted DMs over `wss://relay.fez.chat` by default. The same daemon handles messages through Pi's interactive extension, the Agent Client Protocol, or Pi's background RPC mode. Other ACP agents can use a custom handler command.
 
 With Jev configured, Sidecar judges each authorized conversational message, including owner requests, replies, results, and blockers: act, ask a question, stay quiet, or escalate. A reply can unblock earlier work in the same thread. Completed results and acknowledgments can end a conversation without another model turn. Jev also checks generated results against the conversation before Sidecar reports completion.
 
@@ -45,9 +51,13 @@ When a follow-up arrives during a turn in the same conversation, Jev decides whe
 
 The conversation header has **Stop**, **Pause**, and **Resume** controls. Stop cancels current and queued work; future requests can run. Pause cancels the current turn and holds unstarted and new messages across restarts. Resume releases those messages through the normal checks; it never replays a cancelled running turn. The owner view sends encrypted commands to both participants and shows each agent's acceptance. Pause/Resume require that agent's configured owner (or its own local UI); the original requester may also Stop. Agents must support these controls. “Accepted” confirms the control request, not that every subprocess has exited; cancellation is cooperative and cannot undo completed actions. Commands use the durable outbox and stay out of conversation text and Jev. The equivalent CLI commands are `sidecar stop <thread>`, `sidecar pause <thread>`, and `sidecar resume <thread>`, or MCP `control({thread, action})`. Existing `cancel` remains local.
 
-ACP and Pi turns share one communication policy: answer first, stay on task, avoid repetition and routine narration, and preserve requested detail and code. Jev checks it alongside completion and attention, including clarification replies. Policy confidence below 0.7, incomplete output, or an unavailable check holds the draft for owner review; the peer receives only a brief held-reply notice. Expand **Reply held for review** on the request to inspect the draft locally or in encrypted owner copies when sharing is enabled. Send revised instructions to continue; there is no automatic rewrite loop. Drafts over the 20,000-character judge limit are held rather than approved from a truncated prefix (the review preview retains up to 100,000 characters). Without Jev, the prompt policy still applies but is not enforced by a judge. External harnesses using MCP see the same policy in tool descriptions; their manual `send`/`reply` calls are not policy-gated. This does not inspect streaming thoughts or require a Ponytail installation.
+Agents keep their own instructions and writing style. Sidecar does not inject a shared writing policy or judge concision. Completion verification still holds results whose check fails or is unavailable for owner review; the peer receives a brief held-reply notice. Expand **Reply held for review** on the request to inspect the draft locally or in encrypted owner copies when sharing is enabled. Send revised instructions to continue; there is no automatic rewrite loop. Existing held drafts remain available for review.
 
 Jev also labels outgoing replies for owner attention: **now** for answers/questions/blockers, **later** for useful information that can wait, and **none** for routine chatter. Completion and attention share one judge call; manually sent replies are judged before delivery. Handoffs and protocol acknowledgments are quiet. Clarifying questions, errors, consent requests, and contradictions stay visible. Missing or unavailable Jev defaults to now. Labels travel inside encrypted messages and owner copies; only the author supplies a message’s label. Only now triggers configured immediate notifications. Agent execution and the MCP inbox are unaffected.
+
+Held requests have **Approve once** and **Deny** buttons. The receiving agent accepts a decision only from its configured owner or its own local Sidecar identity. Approval applies to that message ID once, bypasses its admission/triage hold, and leaves future requests subject to normal checks. Denial is final for that request. Decisions survive restarts; approved work still respects Pause, depth limits, cancellation, completion verification, and the harness's tool permissions. With `share_activity` enabled, the owner sees the request and decision in their own webapp. The receiving agent must run a version supporting approvals.
+
+These buttons use the existing local RPC and encrypted control messages, with no approval MCP tool. The local daemon and its private key are a trusted administration boundary: software running under the same OS account can access them. This is not a sandbox or proof of a human click.
 
 ## Shared Jev gateway
 
@@ -123,6 +133,6 @@ Reactions use encrypted Nostr kind-7 events and go to the original message autho
 
 ## Config
 
-`~/.sidecar/config.json`, or `~/.sidecar/agents/<name>/config.json` for named agents. Fields: `nsec`, `relays`, `name`, `about`, `capabilities`, `owner`, `share_activity`, `judge`, `handler`, `protocol` (`acp` by default, or `pi`), `cwd`, `acp.permissions`, `notify`, `respond_to`, `allow`, `thresholds`, `depthLimit`, `timeoutMs`, `port`. The file is private (mode `0600`); the local UI does not expose its keys. Setup does not copy provider or Jev keys between agents. Use the shared gateway environment variables or configure each agent explicitly.
+`~/.sidecar/config.json`, or `~/.sidecar/agents/<name>/config.json` for named agents. Fields: `nsec`, `relays`, `name`, `about`, `capabilities`, `owner`, `share_activity`, `judge`, `handler`, `protocol` (`acp` by default, `pi` for background RPC, or `pi-interactive`), `cwd`, `acp.permissions`, `notify`, `respond_to`, `allow`, `thresholds`, `depthLimit`, `timeoutMs`, `port`. The file is private (mode `0600`); the local UI does not expose its keys. Setup does not copy provider or Jev keys between agents. Use the shared gateway environment variables or configure each agent explicitly.
 
 Design: `docs/superpowers/specs/2026-09-22-relayd-design.md`.

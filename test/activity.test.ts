@@ -4,10 +4,21 @@ import { projectTimeline, attentionOf } from "../src/activity.ts";
 import type { Stored } from "../src/inbox.ts";
 import { npubOf } from "../src/nostr.ts";
 
+test("only the receiver can report an approval, including delayed author and direct copies", () => {
+  const message: Stored = {id: "d".repeat(64), thread: "d".repeat(64), from: "a".repeat(64), to: "b".repeat(64), type: "ask", text: "Count files", depth: 0, ts: 1, read: true, receivedAt: 1};
+  const copy = (from: string, action: string): Stored => ({...message, id: from, from, to: "c".repeat(64), type: "activity",
+    text: JSON.stringify({version: 1, updatedAt: 1, message: {...message, review: {action, by: "c".repeat(64)}}})});
+  const author = copy(message.from, "approve"), receiver = copy(message.to, "deny");
+  assert.equal(projectTimeline([author])[0].review, undefined);
+  for (const records of [[author, receiver], [receiver, author], [message, receiver], [receiver, message]]) {
+    assert.equal(projectTimeline(records)[0].review?.action, "deny");
+  }
+});
+
 test("only the receiver can attach a held draft, regardless of owner-copy delivery order", () => {
   const message: Stored = {id: "d".repeat(64), thread: "d".repeat(64), from: "a".repeat(64), to: "b".repeat(64), type: "ask", text: "A short answer", depth: 0, ts: 1, read: true, receivedAt: 1};
   const copy = (from: string, text: string): Stored => ({...message, id: from, from, to: "c".repeat(64), type: "activity",
-    text: JSON.stringify({version: 1, updatedAt: 1, message: {...message, withheld: {text, reason: "Policy"}}})});
+    text: JSON.stringify({version: 1, updatedAt: 1, message: {...message, withheld: {text, reason: "Incomplete result"}}})});
   const author = copy(message.from, "forged"), receiver = copy(message.to, "real draft");
   assert.equal(projectTimeline([author])[0].withheld, undefined);
   for (const records of [[author, receiver], [receiver, author], [message, receiver], [receiver, message]]) {

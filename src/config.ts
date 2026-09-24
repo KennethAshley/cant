@@ -20,7 +20,7 @@ export interface Config {
   /** Shared Jev gateway; this is a client credential, never the TypeSafe provider key. */
   judge?: { url: string; key: string };
   handler: string;
-  protocol?: "acp" | "pi";
+  protocol?: "acp" | "pi" | "pi-interactive";
   /** Working directory captured during interactive setup. */
   cwd?: string;
   acp: { permissions: "allow" | "deny" };

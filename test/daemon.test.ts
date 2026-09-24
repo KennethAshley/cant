@@ -13,6 +13,7 @@ import { defaultConfig, type Config } from "../src/config.ts";
 import { generateNsec, secretFromNsec, pubkeyOf, npubOf, wrap, unwrap, type Message, type Profile } from "../src/nostr.ts";
 import type { Ask, Answer } from "../src/decide.ts";
 import * as nostr from "../src/nostr.ts";
+import { InteractivePiHandler, type PiMessage } from "../src/pi.ts";
 
 class FakeRelay implements RelayLike {
   subs: { pubkey: string; cb: (ev: Event) => void }[] = [];
@@ -48,7 +49,7 @@ const score = (s: number): Answer => ({ type: "score", score: s, confidence: 1, 
 const noul = (p: number): Answer => ({ type: "noul", noul: p });
 const actAsk: Ask = async (_s, q): Promise<Record<string, Answer> | null> => {
   if ("action" in q) return { action: choice("act", 0.95), urgency: score(1), in_scope: noul(0.9), contradiction: noul(0) };
-  if ("answers_ask" in q) return { answers_ask: noul(0.9), communication_ok: noul(.95) };
+  if ("answers_ask" in q) return { answers_ask: noul(0.9) };
   if ("in_scope" in q) return { in_scope: noul(0.8) };
   if ("route" in q) return { route: choice("none", 0.9) };
   return null;
@@ -69,6 +70,170 @@ function setup(over: Partial<Config> = {}, ask: Ask = actAsk) {
 }
 
 const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+
+test("interactive Pi uses the same approval, verification, and pause gates as background handlers", async () => {
+  const {config, relay, box, me, friend} = setup({allow: []});
+  let idle = true;
+  const prompts: PiMessage[] = [];
+  const handler = new InteractivePiHandler({sendMessage: message => { prompts.push(message); idle = false; }},
+    {isIdle: () => idle, hasPendingMessages: () => false, abort: () => { idle = true; }, sessionManager: {getSessionId: () => "owner-pi-session"}}, 5000);
+  const daemon = new Daemon({config, relay, inbox: box, handler, ask: actAsk, notify() {}});
+  const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "A short hello"});
+  try {
+    await daemon.start(); await relay.publish(request.wraps); await tick(80);
+    assert.equal(prompts.length, 0, "a stranger cannot inject into the owner's session");
+    void daemon.review({id: request.id, action: "approve"}); await tick(80);
+    assert.equal(prompts.length, 1);
+    handler.reply(prompts[0].details.request, "Hello from Pi."); await tick(100);
+    const response = relay.received(friend).find(m => m.type === "done");
+    assert.equal(response?.text, "Hello from Pi.");
+    assert.equal(response?.verification?.status, "passed");
+    assert.equal(box.sessions()[request.id], "owner-pi-session");
+    idle = true; handler.settled();
+    await daemon.control({thread: request.id, action: "pause"});
+    const followup = wrap(friend, pubkeyOf(me), {type: "ask", thread: request.id, text: "One more hello"});
+    await relay.publish(followup.wraps); await tick(50);
+    await daemon.review({id: followup.id, action: "approve"}); await tick(50);
+    assert.equal(prompts.length, 1, "approval does not override pause");
+    await daemon.control({thread: request.id, action: "resume"}); await tick(80);
+    assert.equal(prompts.length, 2);
+    await daemon.control({thread: request.id, action: "stop"}); await tick();
+    assert.throws(() => handler.reply(prompts[1].details.request, "too late"), /active request/);
+    assert.equal(relay.received(friend).filter(m => m.type === "done").length, 1);
+  } finally { daemon.stop(); }
+});
+
+test("owner approval runs only the selected held request once, without trusting the sender", async () => {
+  const {d, relay, handler, me, friend, owner, box, config} = setup({share_activity: true, allow: []}, async (s, q) =>
+    "action" in q ? {...await actAsk(s, q), action: choice("escalate", .95)} : actAsk(s, q));
+  const viewer = new Daemon({config: defaultConfig({nsec: nip19.nsecEncode(owner), name: "owner"}), relay,
+    inbox: new Inbox(fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-approve-"))), notify: () => {}});
+  const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "Count files, without opening them"});
+  const allow = [...config.allow];
+  try {
+    await d.start(); await viewer.start(); await relay.publish(request.wraps); await tick(100);
+    assert.equal(handler.prompts.length, 0);
+    assert.equal(typeof viewer.review, "function");
+    await viewer.review({id: request.id, action: "approve"}); await tick(150);
+    assert.equal(handler.prompts.length, 1);
+    assert.equal(box.get(request.id)?.review?.action, "approve");
+    assert.equal(viewer.timeline().messages.find(m => m.id === request.id)?.review?.action, "approve");
+    assert.equal(viewer.timeline().reviews[request.id]?.accepted, true);
+    assert.deepEqual(config.allow, allow);
+    await relay.publish(wrap(owner, pubkeyOf(me), {type: "control", thread: request.id,
+      text: JSON.stringify({kind: "review", action: "approve", request: request.id})}).wraps);
+    const next = wrap(friend, pubkeyOf(me), {type: "ask", text: "A separate task", thread: request.id});
+    await relay.publish(next.wraps); await tick(100);
+    assert.equal(handler.prompts.length, 1, "approval must not authorize a second request or replay the first");
+  } finally { d.stop(); viewer.stop(); }
+});
+
+test("a peer cannot approve itself and a denied request stays denied after restart", async () => {
+  const {d, relay, handler, me, friend, owner, box, config, dir} = setup({allow: []});
+  const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "Needs consent"});
+  const review = (secret: Uint8Array, action: string) => relay.publish(wrap(secret, pubkeyOf(me), {type: "control", thread: request.id,
+    text: JSON.stringify({kind: "review", action, request: request.id})}).wraps);
+  try {
+    await d.start(); await relay.publish(request.wraps); await tick(80);
+    await review(friend, "approve"); await tick();
+    assert.equal(handler.prompts.length, 0);
+    assert.equal(box.get(request.id)?.review, undefined);
+    assert.equal(typeof d.review, "function");
+    await d.review({id: request.id, action: "deny"});
+    await review(owner, "approve"); await tick(80);
+    assert.equal(handler.prompts.length, 0);
+    assert.equal(box.get(request.id)?.review?.action, "deny");
+  } finally { d.stop(); }
+  const resumedHandler = new FakeHandler();
+  const resumed = new Daemon({config, relay: new FakeRelay(), inbox: new Inbox(dir), handler: resumedHandler, ask: actAsk, notify: () => {}});
+  try { await resumed.start(); await tick(); assert.equal(resumedHandler.prompts.length, 0); }
+  finally { resumed.stop(); }
+});
+
+test("an approved request stays paused across restart and runs on Resume", async () => {
+  const {d, relay, handler, me, friend, box, config, dir} = setup({}, async (s, q) =>
+    "action" in q ? {...await actAsk(s, q), action: choice("escalate", .95)} : actAsk(s, q));
+  const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "Held work"});
+  try {
+    await d.start(); await relay.publish(request.wraps); await tick(80);
+    await d.control({thread: request.id, action: "pause"});
+    assert.equal(typeof d.review, "function");
+    await d.review({id: request.id, action: "approve"});
+    assert.equal(handler.prompts.length, 0);
+    assert.equal(box.get(request.id)?.work, "pending");
+  } finally { d.stop(); }
+  const resumedHandler = new FakeHandler();
+  const resumed = new Daemon({config, relay: new FakeRelay(), inbox: new Inbox(dir), handler: resumedHandler, ask: actAsk, notify: () => {}});
+  try {
+    await resumed.start(); await tick(); assert.equal(resumedHandler.prompts.length, 0);
+    await resumed.control({thread: request.id, action: "resume"}); await tick(80);
+    assert.equal(resumedHandler.prompts.length, 1);
+  } finally { resumed.stop(); }
+});
+
+test("Resume racing with an approval receipt cannot queue the approved request against itself", async () => {
+  const copyStarted = deferred(), releaseCopy = deferred(), working = deferred(), finish = deferred();
+  const {d, relay, handler, me, friend, owner, box} = setup({share_activity: true, allow: []});
+  const publish = relay.publish.bind(relay);
+  relay.publish = async events => {
+    const copies = events.map(e => unwrap(e, owner));
+    if (copies.some(m => m?.type === "activity" && JSON.parse(m.text).message.review?.action === "approve")) {
+      copyStarted.resolve(); await releaseCopy.promise;
+    }
+    await publish(events);
+  };
+  handler.prompt = async (thread, text) => { handler.prompts.push({thread, text}); working.resolve(); await finish.promise; return {text: "done", stopReason: "end_turn"}; };
+  const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "One turn"});
+  try {
+    await d.start(); await relay.publish(request.wraps); await tick(80);
+    await d.control({thread: request.id, action: "pause"});
+    const approval = d.review({id: request.id, action: "approve"});
+    await copyStarted.promise;
+    await d.control({thread: request.id, action: "resume"}); await working.promise;
+    releaseCopy.resolve(); await approval; await tick();
+    assert.equal(box.get(request.id)?.steering, undefined, "the same request is not a follow-up to itself");
+    finish.resolve(); await tick(80);
+    assert.equal(handler.prompts.length, 1);
+  } finally { releaseCopy.resolve(); finish.resolve(); d.stop(); }
+});
+
+test("owner reviews cannot override message identity, depth, completed work, or withheld replies", async () => {
+  const {d, relay, handler, me, friend, owner, box, config} = setup();
+  try {
+    await d.start();
+    for (const kind of ["thread", "recipient", "depth", "completed", "withheld", "interrupted", "result"] as const) {
+      const message = wrap(friend, kind === "recipient" ? pubkeyOf(owner) : pubkeyOf(me), {type: kind === "result" ? "done" : "ask", text: kind,
+        depth: kind === "depth" ? config.depthLimit : 0}).message;
+      box.append(message, {work: kind === "interrupted" ? "interrupted" : "finished",
+        triage: {action: kind === "completed" ? "act" : "escalate", confidence: 1, urgency: 0, inScope: 1, reason: "test"},
+        ...(kind === "withheld" ? {withheld: {text: "draft", reason: "incomplete"}} : {})});
+      const command = wrap(owner, pubkeyOf(me), {type: "control", thread: kind === "thread" ? "another-thread" : message.thread,
+        text: JSON.stringify({kind: "review", action: "approve", request: message.id})});
+      await relay.publish(command.wraps); await tick();
+      assert.equal(box.get(message.id)?.review, undefined, kind);
+      assert.ok(relay.received(owner).some(m => m.type === "control" && JSON.parse(m.text).request === command.id && JSON.parse(m.text).accepted === false), kind);
+    }
+    assert.equal(handler.prompts.length, 0);
+  } finally { d.stop(); }
+});
+
+test("recovery finishes an approval receipt and starts durable unstarted work only once", async () => {
+  const {d, me, friend, owner, box, config, dir} = setup({allow: []});
+  const source = wrap(friend, pubkeyOf(me), {type: "ask", text: "Approved before crash"}).message;
+  box.append(source, {parked: false, work: "pending", review: {action: "approve", by: pubkeyOf(owner)}});
+  box.append(wrap(owner, pubkeyOf(me), {type: "control", thread: source.thread,
+    text: JSON.stringify({kind: "review", action: "approve", request: source.id})}).message, {read: true, work: "pending"});
+  d.stop();
+  for (let restart = 0; restart < 2; restart++) {
+    const handler = new FakeHandler(), relay = new FakeRelay();
+    const resumed = new Daemon({config, handler, relay, inbox: new Inbox(dir), ask: actAsk, notify: () => {}});
+    try {
+      await resumed.start(); await tick(100);
+      assert.equal(handler.prompts.length, restart === 0 ? 1 : 0);
+      if (restart === 0) assert.ok(relay.received(owner).some(m => m.type === "control" && JSON.parse(m.text).accepted === true));
+    } finally { resumed.stop(); }
+  }
+});
 
 test("Pause during Jev preserves the unstarted turn, even when Resume arrives before Jev returns", async () => {
   const judge = deferred(), judging = deferred(); let first = true;
@@ -102,25 +267,26 @@ test("an unprocessed Stop is recovered before pending work can start", async () 
   } finally { d.stop(); }
 });
 
-test("shared concise policy holds unsuitable replies for the owner without leaking the draft to the peer", async () => {
+test("agents keep their own reply style without an extra style or clarification gate", async () => {
   for (const mode of ["act", "ask"] as const) {
     let checks = 0;
-    const {d, box, relay, handler, me, friend, owner} = setup({share_activity: true}, async (s, q) => {
+    const questions: string[][] = [];
+    const {d, box, relay, handler, me, friend} = setup({}, async (s, q) => {
+      questions.push(Object.keys(q));
       if ("action" in q) return {...await actAsk(s, q), action: choice(mode, .95)};
-      if ("answers_ask" in q) { checks++; return {answers_ask: noul(.99), communication_ok: noul(.1)}; }
+      if ("answers_ask" in q) { checks++; return {answers_ask: noul(.99)}; }
       return actAsk(s, q);
     });
-    handler.reply = "PRIVATE HELD DRAFT: irrelevant rambling";
-    const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "One useful sentence please"});
+    handler.reply = mode === "act" ? "Detailed result:\n" + "Requested explanation. ".repeat(1000) : "Which environment should I use?";
+    const request = wrap(friend, pubkeyOf(me), {type: "ask", text: "Use your usual format and provide the detail needed."});
     try {
       await d.start(); await relay.publish(request.wraps); await tick(150);
-      assert.equal(checks, 1, "policy shares the completion check, including clarification turns");
-      assert.match(handler.prompts[0].text, /answer or result first/i);
-      assert.ok(!relay.received(friend).some(m => m.text.includes("PRIVATE HELD DRAFT")));
-      assert.match(relay.received(friend).find(m => m.type === "cant")?.text ?? "", /held for owner review/i);
-      assert.equal(box.get(request.id)?.withheld?.text, handler.reply);
-      const copies = relay.received(owner).filter(m => m.type === "activity").map(m => JSON.parse(m.text).message);
-      assert.ok(copies.some(m => m.withheld?.text === handler.reply));
+      const result = relay.received(friend).find(m => m.type === (mode === "act" ? "done" : "answer"));
+      assert.equal(result?.text, handler.reply, "do not withhold or rewrite an agent's format or long answer");
+      assert.equal(checks, mode === "act" ? 1 : 0, "retain completion verification without gating clarification turns");
+      assert.ok(questions.every(q => !q.includes("communication_ok")));
+      assert.doesNotMatch(handler.prompts[0].text, /Shared communication policy|answer or result first/);
+      assert.equal(box.get(request.id)?.withheld, undefined);
     } finally { d.stop(); }
   }
 });
@@ -633,7 +799,7 @@ test("restart preserves a correction's place ahead of older queued messages", as
 test("attention labels reach the peer and owner without suppressing agent work", async () => {
   for (const level of ["now", "later", "none"] as const) {
     const {d, relay, me, friend, owner, notes, handler} = setup({}, async (s, q) => {
-      if ("answers_ask" in q) return {answers_ask: noul(0.9), communication_ok: noul(.95), needs_owner: noul(level === "none" ? 0.1 : 0.9), attention_urgency: choice(level, 0.9)};
+      if ("answers_ask" in q) return {answers_ask: noul(0.9), needs_owner: noul(level === "none" ? 0.1 : 0.9), attention_urgency: choice(level, 0.9)};
       return actAsk(s, q);
     });
     try {
@@ -761,7 +927,7 @@ test("owner request still runs when no judge is configured", async () => {
 });
 
 test("incomplete replies are held locally instead of forwarding the draft", async () => {
-  const ask: Ask = async (s, q) => ("answers_ask" in q ? { answers_ask: noul(0.1), communication_ok: noul(.95) } : actAsk(s, q));
+  const ask: Ask = async (s, q) => ("answers_ask" in q ? { answers_ask: noul(0.1) } : actAsk(s, q));
   const { d, relay, handler, me, friend, box } = setup({}, ask);
   handler.reply = "I could not";
   await d.start();

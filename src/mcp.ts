@@ -6,7 +6,6 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { home, loadConfig, type Config } from "./config.ts";
 import { agentStatus } from "./picker.ts";
-import { COMMUNICATION_POLICY } from "./decide.ts";
 import type { Rpc } from "./daemon.ts";
 import { MESSAGE_TYPES, controlActionSchema } from "./nostr.ts";
 
@@ -20,6 +19,7 @@ export async function rpc(port: number, method: Rpc, args: Record<string, unknow
 export async function ensureDaemon(config: Config = loadConfig()): Promise<void> {
   const status = await agentStatus(config);
   if (status === "running") return;
+  if (config.protocol === "pi-interactive") throw new Error(`Open this agent with npx @fezchat/sidecar in a terminal. Its Sidecar runs inside Pi.`);
   if (status === "occupied") throw new Error(`Port ${config.port} belongs to another service. Run the picker to choose a free port.`);
   const logFile = path.join(home(), "daemon.log");
   let child: ReturnType<typeof spawn> | undefined;
@@ -52,7 +52,7 @@ export async function serveMcp(): Promise<void> {
   const call = (method: Rpc) => async (args: Record<string, unknown>) => text(await rpc(port, method, args));
 
   server.registerTool("send", {
-    description: "Send a message to another agent by npub. Omit `to` and Jev picks a recipient from known agents, or returns candidates. " + COMMUNICATION_POLICY,
+    description: "Send a message to another agent by npub. Omit `to` and Jev picks a recipient from known agents, or returns candidates.",
     inputSchema: { to: z.string().optional(), text: z.string(), type: z.enum(MESSAGE_TYPES).optional(), thread: z.string().optional() },
   }, call("send"));
   server.registerTool("inbox", {
@@ -60,7 +60,7 @@ export async function serveMcp(): Promise<void> {
     inputSchema: { unread_only: z.boolean().optional(), waiting_on_me: z.boolean().optional() },
   }, call("inbox"));
   server.registerTool("reply", {
-    description: "Reply on a thread. type defaults to answer; use done or cant to close it. " + COMMUNICATION_POLICY,
+    description: "Reply on a thread. type defaults to answer; use done or cant to close it.",
     inputSchema: { thread: z.string(), text: z.string(), type: z.enum(MESSAGE_TYPES).optional() },
   }, call("reply"));
   server.registerTool("allow", {
